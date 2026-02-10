@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AirBridge</string>
+    <string name="dashboard">Dashboard</string>
+    <string name="storage_permission_required">Storage permission required</string>
+    <string name="start_server">Start Server</string>
+    <string name="stop_server">Stop Server</string>
+    <string name="server_running">Server Running</string>
+    <string name="server_stopped">Server Stopped</string>
+    <string name="show_qr">Show QR Code</string>
+    <string name="scan_to_connect">Scan to connect</string>
+    <string name="server_address">Server Address: %1$s</string>
+    <string name="not_running">Not running</string>
+    <string name="browse_files">Browse Files</string>
+    <string name="grant_permission">Grant Permission</string>
+    <string name="copy_url">Copy URL</string>
+    <string name="open_camera">Open Camera</string>
+</resources>

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="files">Files</string>
+    <string name="no_files">No files found</string>
+    <string name="go_back">Go back</string>
+    <string name="folder_icon">Folder</string>
+    <string name="file_icon">File</string>
+</resources>

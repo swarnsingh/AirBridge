@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AirBridge - File Manager</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .pairing-card {
+            background: white;
+            border-radius: 20px;
+            padding: 48px;
+            text-align: center;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            max-width: 500px;
+        }
+        h1 {
+            font-size: 32px;
+            margin-bottom: 16px;
+            color: #1a202c;
+        }
+        .subtitle {
+            color: #718096;
+            margin-bottom: 32px;
+            font-size: 16px;
+        }
+        #qrcode {
+            display: inline-block;
+            padding: 20px;
+            background: white;
+            border-radius: 12px;
+            margin: 24px 0;
+        }
+        .instructions {
+            background: #f7fafc;
+            padding: 20px;
+            border-radius: 12px;
+            margin-top: 24px;
+            text-align: left;
+        }
+        .step {
+            display: flex;
+            align-items: start;
+            margin: 12px 0;
+            gap: 12px;
+        }
+        .step-number {
+            background: #667eea;
+            color: white;
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 600;
+            flex-shrink: 0;
+        }
+        .step-text {
+            color: #2d3748;
+            line-height: 1.6;
+        }
+        .spinner {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .loading-text {
+            color: #718096;
+            margin-top: 12px;
+        }
+        #app {
+            display: none;
+        }
+        .file-list {
+            padding: 20px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .file-item {
+            background: white;
+            padding: 16px;
+            margin: 8px 0;
+            border-radius: 8px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .upload-zone {
+            border: 2px dashed #667eea;
+            padding: 40px;
+            text-align: center;
+            border-radius: 12px;
+            margin: 20px 0;
+            background: rgba(255,255,255,0.1);
+            cursor: pointer;
+        }
+        .upload-zone.drag-over {
+            background: rgba(102, 126, 234, 0.1);
+            border-color: #764ba2;
+        }
+
+        .upload-progress-list {
+            margin-top: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .upload-progress-item {
+            background: rgba(255, 255, 255, 0.8);
+            border-radius: 8px;
+            padding: 8px 12px;
+            font-size: 13px;
+        }
+
+        .upload-progress-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 4px;
+        }
+
+        .upload-progress-bar {
+            width: 100%;
+            height: 4px;
+            border-radius: 999px;
+            background: #E2E8F0;
+            overflow: hidden;
+        }
+
+        .upload-progress-bar-inner {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, #667eea, #764ba2);
+            transition: width 0.15s ease-out;
+        }
+    </style>
+</head>
+<body>
+    <!-- Pairing Screen -->
+    <div id="pairing">
+        <div class="pairing-card">
+            <h1>🌉 AirBridge</h1>
+            <p class="subtitle">Scan to connect your phone</p>
+            
+            <div id="qrcode"></div>
+            
+            <div class="spinner"></div>
+            <p class="loading-text">Waiting for phone to scan...</p>
+            
+            <div class="instructions">
+                <div class="step">
+                    <div class="step-number">1</div>
+                    <div class="step-text">Open AirBridge app on your phone</div>
+                </div>
+                <div class="step">
+                    <div class="step-number">2</div>
+                    <div class="step-text">Tap "Scan QR Code" button</div>
+                </div>
+                <div class="step">
+                    <div class="step-number">3</div>
+                    <div class="step-text">Point camera at QR code above</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main App (hidden until authenticated) -->
+    <div id="app">
+        <div class="file-list">
+            <h2>📁 Files</h2>
+            
+            <div class="upload-zone" id="uploadZone">
+                <p>📤 Drop files here or click to upload</p>
+                <input type="file" id="fileInput" multiple style="display:none">
+            </div>
+            <div id="uploadProgress" class="upload-progress-list"></div>
+            <div id="filesList"></div>
+        </div>
+    </div>
+
+    <!-- QR Code Library -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+
+    <script>
+        const serverUrl = window.location.origin;
+        let token = new URLSearchParams(window.location.search).get('token');
+        let pairingId = null;
+
+        // If token in URL, skip pairing
+        if (token && token !== 'null') {
+            showApp();
+        } else {
+            startPairing();
+        }
+
+        async function startPairing() {
+            try {
+                // Request pairing session
+                const response = await fetch(`${serverUrl}/api/pair/request`, {
+                    method: 'POST'
+                });
+                const data = await response.json();
+                pairingId = data.pairingId;
+
+                // Generate QR code with pairing URL
+                const pairingUrl = `airbridge://pair?id=${pairingId}&server=${encodeURIComponent(serverUrl)}`;
+                new QRCode(document.getElementById('qrcode'), {
+                    text: pairingUrl,
+                    width: 256,
+                    height: 256,
+                    colorDark: '#1a202c',
+                    colorLight: '#ffffff',
+                    correctLevel: QRCode.CorrectLevel.H
+                });
+
+                // Poll for approval
+                checkPairingStatus();
+            } catch (error) {
+                console.error('Pairing failed:', error);
+                document.querySelector('.loading-text').textContent = 'Connection failed. Refresh to try again.';
+            }
+        }
+
+        async function checkPairingStatus() {
+            try {
+                const response = await fetch(`${serverUrl}/api/pair/status?id=${pairingId}`);
+                const data = await response.json();
+
+                if (data.approved && data.token) {
+                    token = data.token;
+                    // Update URL
+                    window.history.replaceState({}, '', `${serverUrl}/?token=${token}`);
+                    showApp();
+                } else {
+                    // Check again in 2 seconds
+                    setTimeout(checkPairingStatus, 2000);
+                }
+            } catch (error) {
+                console.error('Status check failed:', error);
+                setTimeout(checkPairingStatus, 2000);
+            }
+        }
+
+        function showApp() {
+            document.getElementById('pairing').style.display = 'none';
+            document.getElementById('app').style.display = 'block';
+            document.body.style.background = '#f5f5f5';
+            loadFiles();
+        }
+
+        // File operations
+        async function loadFiles() {
+            try {
+                const response = await fetch(`${serverUrl}/api/files?token=${token}`);
+                const files = await response.json();
+                displayFiles(files);
+            } catch (error) {
+                console.error('Failed to load files:', error);
+            }
+        }
+
+        function displayFiles(files) {
+            const container = document.getElementById('filesList');
+            container.innerHTML = files.map(file => `
+                <div class="file-item">
+                    <span>${file.icon} ${file.name}</span>
+                    <a href="${serverUrl}/api/download/${file.id}?token=${token}" download>⬇️ Download</a>
+                </div>
+            `).join('');
+        }
+
+        // Upload handling
+        const uploadZone = document.getElementById('uploadZone');
+        const fileInput = document.getElementById('fileInput');
+
+        uploadZone.onclick = () => fileInput.click();
+        
+        uploadZone.ondragover = (e) => {
+            e.preventDefault();
+            uploadZone.classList.add('drag-over');
+        };
+        
+        uploadZone.ondragleave = () => uploadZone.classList.remove('drag-over');
+        
+        uploadZone.ondrop = async (e) => {
+            e.preventDefault();
+            uploadZone.classList.remove('drag-over');
+            await uploadFiles(e.dataTransfer.files);
+        };
+        
+        fileInput.onchange = (e) => uploadFiles(e.target.files);
+
+        async function uploadFiles(files) {
+            const progressContainer = document.getElementById('uploadProgress');
+            const uploadPromises = [];
+
+            for (const file of files) {
+                const item = document.createElement('div');
+                item.className = 'upload-progress-item';
+
+                const header = document.createElement('div');
+                header.className = 'upload-progress-header';
+                const nameSpan = document.createElement('span');
+                nameSpan.textContent = file.name;
+                const percentSpan = document.createElement('span');
+                percentSpan.textContent = '0%';
+                header.appendChild(nameSpan);
+                header.appendChild(percentSpan);
+
+                const bar = document.createElement('div');
+                bar.className = 'upload-progress-bar';
+                const barInner = document.createElement('div');
+                barInner.className = 'upload-progress-bar-inner';
+                bar.appendChild(barInner);
+
+                item.appendChild(header);
+                item.appendChild(bar);
+                progressContainer.appendChild(item);
+
+                const uploadPromise = new Promise((resolve) => {
+                    const xhr = new XMLHttpRequest();
+                    xhr.open('POST', `${serverUrl}/api/upload?token=${token}&filename=${encodeURIComponent(file.name)}`);
+
+                    xhr.upload.onprogress = (event) => {
+                        if (event.lengthComputable) {
+                            const percent = Math.round((event.loaded / event.total) * 100);
+                            barInner.style.width = `${percent}%`;
+                            percentSpan.textContent = `${percent}%`;
+                        }
+                    };
+
+                    xhr.onload = () => {
+                        if (xhr.status >= 200 && xhr.status < 300) {
+                            barInner.style.width = '100%';
+                            percentSpan.textContent = 'Done';
+                        } else {
+                            percentSpan.textContent = 'Error';
+                        }
+                        resolve();
+                    };
+
+                    xhr.onerror = () => {
+                        percentSpan.textContent = 'Error';
+                        resolve();
+                    };
+
+                    const formData = new FormData();
+                    formData.append('file', file);
+                    xhr.send(formData);
+                });
+
+                uploadPromises.push(uploadPromise);
+            }
+
+            await Promise.all(uploadPromises);
+            loadFiles();
+        }
+    </script>
+</body>
+</html>
