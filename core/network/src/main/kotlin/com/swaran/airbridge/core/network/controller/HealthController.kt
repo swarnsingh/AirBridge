@@ -1,6 +1,6 @@
 package com.swaran.airbridge.core.network.controller
 
-import com.google.gson.Gson
+import org.json.JSONObject
 import com.swaran.airbridge.core.network.LocalHttpServer
 import fi.iki.elonen.NanoHTTPD
 import javax.inject.Inject
@@ -8,8 +8,6 @@ import javax.inject.Inject
 class HealthController @Inject constructor(
     server: LocalHttpServer
 ) : LocalHttpServer.RequestHandler {
-
-    private val gson = Gson()
 
     init {
         server.registerHandler(this)
@@ -20,16 +18,16 @@ class HealthController @Inject constructor(
     }
 
     override fun handle(session: NanoHTTPD.IHTTPSession): NanoHTTPD.Response {
-        val response = mapOf(
-            "status" to "ok",
-            "service" to "AirBridge",
-            "version" to "1.0"
-        )
+        val response = JSONObject().apply {
+            put("status", "ok")
+            put("service", "AirBridge")
+            put("version", "1.0")
+        }
 
         return NanoHTTPD.newFixedLengthResponse(
             NanoHTTPD.Response.Status.OK,
             "application/json",
-            gson.toJson(response)
+            response.toString()
         )
     }
 }

@@ -27,7 +27,6 @@ dependencies {
     implementation(project(":core:common"))
     implementation(project(":domain"))
     implementation(libs.nanohttpd)
-    implementation(libs.gson)
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.hilt.android)
     implementation(libs.zxing.core)

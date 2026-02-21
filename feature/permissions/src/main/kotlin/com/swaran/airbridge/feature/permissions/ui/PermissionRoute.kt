@@ -1,4 +1,4 @@
-package com.swaran.airbridge.feature.permissions
+package com.swaran.airbridge.feature.permissions.ui
 
 import android.Manifest
 import android.content.Context
@@ -6,43 +6,22 @@ import android.content.pm.PackageManager
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.FolderOpen
-import androidx.compose.material3.Button
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalLifecycleOwner
-import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.repeatOnLifecycle
+import com.swaran.airbridge.feature.permissions.mvi.PermissionEffect
+import com.swaran.airbridge.feature.permissions.mvi.PermissionIntent
+import com.swaran.airbridge.feature.permissions.viewmodel.PermissionViewModel
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun PermissionScreen(
+fun PermissionRoute(
     viewModel: PermissionViewModel = hiltViewModel(),
     onNavigateToDashboard: () -> Unit = {},
     onNavigateToSettings: () -> Unit = {}
@@ -91,62 +70,13 @@ fun PermissionScreen(
         }
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(id = R.string.permissions)) }
-            )
-        }
-    ) { paddingValues ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(paddingValues)
-                .padding(24.dp)
-        ) {
-            Column(
-                modifier = Modifier.fillMaxSize(),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Default.FolderOpen,
-                    contentDescription = stringResource(id = R.string.folder_icon),
-                    modifier = Modifier.size(120.dp),
-                    tint = MaterialTheme.colorScheme.primary
-                )
-
-                Spacer(modifier = Modifier.height(32.dp))
-
-                Text(
-                    text = stringResource(id = R.string.storage_access_title),
-                    style = MaterialTheme.typography.headlineMedium,
-                    textAlign = TextAlign.Center
-                )
-
-                Spacer(modifier = Modifier.height(16.dp))
-
-                Text(
-                    text = stringResource(id = R.string.storage_access_desc),
-                    style = MaterialTheme.typography.bodyLarge,
-                    textAlign = TextAlign.Center,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-
-                Spacer(modifier = Modifier.height(32.dp))
-
-                Button(
-                    onClick = { viewModel.sendIntent(PermissionIntent.RequestStoragePermission) },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(stringResource(id = R.string.grant_permission))
-                }
-            }
-        }
-    }
+    PermissionScreen(
+        state = state,
+        onRequestPermission = { viewModel.sendIntent(PermissionIntent.RequestStoragePermission) }
+    )
 }
 
-private fun checkStoragePermission(context: Context): Boolean {
+internal fun checkStoragePermission(context: Context): Boolean {
     return when {
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> {
             ContextCompat.checkSelfPermission(context, Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED &&

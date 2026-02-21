@@ -1,9 +1,10 @@
-package com.swaran.airbridge.feature.dashboard
+package com.swaran.airbridge.feature.dashboard.viewmodel
 
 import android.net.Uri
 import androidx.lifecycle.viewModelScope
 import com.swaran.airbridge.core.common.ResultState
 import com.swaran.airbridge.core.mvi.MviViewModel
+import com.swaran.airbridge.core.network.PushManager
 import com.swaran.airbridge.core.network.controller.UploadController
 import com.swaran.airbridge.domain.model.ServerStatus
 import com.swaran.airbridge.domain.repository.StorageAccessManager
@@ -11,7 +12,11 @@ import com.swaran.airbridge.domain.usecase.GenerateQrCodeUseCase
 import com.swaran.airbridge.domain.usecase.GetServerAddressUseCase
 import com.swaran.airbridge.domain.usecase.StartServerUseCase
 import com.swaran.airbridge.domain.usecase.StopServerUseCase
+import com.swaran.airbridge.feature.dashboard.mvi.DashboardIntent
+import com.swaran.airbridge.feature.dashboard.mvi.DashboardState
+import com.swaran.airbridge.feature.dashboard.mvi.DashboardEffect
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.collections.immutable.toImmutableList
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
@@ -24,16 +29,24 @@ class DashboardViewModel @Inject constructor(
     private val getServerAddressUseCase: GetServerAddressUseCase,
     private val generateQrCodeUseCase: GenerateQrCodeUseCase,
     private val storageAccessManager: StorageAccessManager,
-    val uploadController: UploadController
+    private val pushManager: PushManager,
+    private val uploadController: UploadController
 ) : MviViewModel<DashboardIntent, DashboardState, DashboardEffect>(DashboardState()) {
 
     init {
-        updateState { copy(hasStoragePermission = storageAccessManager.hasStorageDirectory()) }
+        updateState { 
+            copy(
+                hasStoragePermission = true, // Default folder is always available
+                storageDirectoryUri = Uri.parse(storageAccessManager.getStorageDirectoryUri())
+            ) 
+        }
         loadServerAddress()
-    }
 
-    init {
-        loadServerAddress()
+        uploadController.activeUploads
+            .onEach { uploads ->
+                updateState { copy(activeUploads = uploads.values.toImmutableList()) }
+            }
+            .launchIn(viewModelScope)
     }
 
     override suspend fun handleIntent(intent: DashboardIntent) {
@@ -51,6 +64,18 @@ class DashboardViewModel @Inject constructor(
             is DashboardIntent.SelectStorageDirectory -> {
                 storageAccessManager.setStorageDirectory(intent.uri.toString())
                 updateState { copy(storageDirectoryUri = intent.uri) }
+            }
+            is DashboardIntent.SendToComputer -> {
+                pushManager.enqueuePush(intent.fileName, intent.uri)
+            }
+            is DashboardIntent.PauseUpload -> {
+                uploadController.pauseUpload(intent.uploadId)
+            }
+            is DashboardIntent.ResumeUpload -> {
+                uploadController.resumeUpload(intent.uploadId)
+            }
+            is DashboardIntent.CancelUpload -> {
+                uploadController.cancelUpload(intent.uploadId)
             }
         }
     }

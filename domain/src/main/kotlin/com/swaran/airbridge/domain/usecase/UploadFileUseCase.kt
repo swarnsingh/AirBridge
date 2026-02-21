@@ -19,7 +19,11 @@ class UploadFileUseCase @Inject constructor(
     data class Params(
         val path: String,
         val fileName: String,
-        val inputStream: InputStream
+        val uploadId: String,
+        val inputStream: InputStream,
+        val totalBytes: Long,
+        val append: Boolean = false,
+        val onProgress: (Long) -> Unit = {}
     )
 
     override fun mapToDomain(data: FileItem): FileItem = data
@@ -27,9 +31,13 @@ class UploadFileUseCase @Inject constructor(
     override suspend fun execute(parameters: Params): Flow<ResultState<out FileItem>> =
         fetchResponse {
             storageRepository.uploadFile(
-                parameters.path,
-                parameters.fileName,
-                parameters.inputStream
+                path = parameters.path,
+                fileName = parameters.fileName,
+                uploadId = parameters.uploadId,
+                inputStream = parameters.inputStream,
+                totalBytes = parameters.totalBytes,
+                append = parameters.append,
+                onProgress = parameters.onProgress
             ).getOrThrow()
         }
 }

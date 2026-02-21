@@ -1,16 +1,28 @@
-package com.swaran.airbridge.feature.filebrowser
+package com.swaran.airbridge.feature.filebrowser.viewmodel
 
 import androidx.lifecycle.viewModelScope
 import com.swaran.airbridge.core.common.ResultState
 import com.swaran.airbridge.core.mvi.MviViewModel
 import com.swaran.airbridge.domain.model.FileItem
 import com.swaran.airbridge.domain.usecase.BrowseFilesUseCase
+import com.swaran.airbridge.feature.filebrowser.mvi.FileBrowserEffect
+import com.swaran.airbridge.feature.filebrowser.mvi.FileBrowserIntent
+import com.swaran.airbridge.feature.filebrowser.mvi.FileBrowserState
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.collections.immutable.toImmutableList
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
+/**
+ * ViewModel for the File Browser feature.
+ *
+ * Manages the state of file browsing operations including loading files,
+ * navigating directories, and handling file selection.
+ *
+ * @property browseFilesUseCase Use case for browsing files in a directory
+ */
 @HiltViewModel
 class FileBrowserViewModel @Inject constructor(
     private val browseFilesUseCase: BrowseFilesUseCase
@@ -40,7 +52,7 @@ class FileBrowserViewModel @Inject constructor(
                         updateState {
                             copy(
                                 isLoading = false,
-                                files = result.data
+                                files = result.data.toImmutableList()
                             )
                         }
                     }

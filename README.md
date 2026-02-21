@@ -4,166 +4,72 @@ AirBridge
 Overview
 --------
 
-AirBridge is an Android LAN file‑sharing app that turns your phone into a local HTTP server so you can send and receive files between your device and any browser on the same Wi‑Fi network. It uses a foreground service plus an embedded HTTP server and a rich web UI to provide drag‑and‑drop uploads, downloads, and basic previews without any cloud backend.
+AirBridge is a robust, high‑performance Android LAN file‑sharing app that transforms your device into a local HTTP server. It enables seamless, lightning-fast file transfers between your phone and any browser on the same Wi‑Fi network. Built with modern Android standards, it features a foreground service, parallel resumable upload support, and a responsive web UI—all without requiring any cloud backend or internet connection.
 
 Key Features
 -----------
 
-- Android app
-  - Permissions screen to request media/storage access
-  - Dashboard to start/stop the local HTTP server
-  - QR code and “Copy URL” to connect browsers easily
-  - File browser screen for on‑device files
-  - Per‑file upload progress list (Xender‑style) driven from the server
-- Web UI
-  - Modern single‑page interface (`web/src/main/assets/index.html`)
-  - File list with download links
-  - Drag‑and‑drop or picker‑based uploads
-  - Parallel uploads with per‑file progress bars
-- Local HTTP server
-  - Runs on `http://<phone-ip>:8080`
-  - Token‑based session auth
-  - Controllers for listing, uploading, downloading, and zipping files
+- **High-Performance Transfers**
+  - **True Parallel Uploads**: Send multiple files simultaneously from your browser.
+  - **Manual Pause & Resume**: Individually control every parallel transfer. Pause an upload on your phone and resume it later from your browser (or vice versa).
+  - **Robust Cancellation**: Stop ongoing transfers instantly with proper cleanup. "Cancel" deletes partial data, while "Pause" preserves it for resumption.
+  - **Background Reliability**: Uses a **Foreground Service** + **WakeLock** to ensure transfers continue even when the app is in the background or the screen is off.
+- **Modern Android Integration**
+  - **Zero-Config Startup**: Automatically uses a default "AirBridge" folder in `Downloads` for immediate use.
+  - **Custom Storage**: Seamlessly switch between the default folder and any specific directory via the Storage Access Framework (SAF).
+  - **Latest Tech Stack**: Targets **Android 16 (API 36)** and requires **Android 12 (API 31)** as minimum.
+- **Seamless Connectivity**
+  - **Bidirectional Control**: Manage uploads from both the Android App Dashboard and the Web Interface.
+  - **Instant Pairing**: Connect via QR Code scanning or "Copy URL".
+  - **Automatic Resumption**: Browser-side persistence tracks interrupted uploads, allowing them to resume exactly where they left off after a reconnect.
 
 Architecture
 ------------
 
-The project follows a Clean Architecture, multi‑module setup:
+AirBridge follows **Clean Architecture** principles within a highly modularized structure, ensuring a clear separation of concerns and a testable codebase.
 
-- `domain` (pure Kotlin)
-  - Entities in `domain.model` such as `FileItem`, `FolderItem`, `SessionInfo`, `ServerStatus`
-  - Repository interfaces: `ServerRepository`, `StorageRepository`, `StorageAccessManager`, `SessionRepository`
-  - Use cases under `domain.usecase` (e.g. `StartServerUseCase`, `StopServerUseCase`, `GenerateQrCodeUseCase`, `BrowseFilesUseCase`, `UploadFileUseCase`)
-  - Shared `UseCase` base class in `core.common` (ResultState + dispatcher injection)
-- `core:common` (pure Kotlin)
-  - `ResultState` sealed class for Loading/Success/Error streams
-  - `Dispatcher` qualifier + `AirDispatchers` enum
-- `core:data` (Android library)
-  - Hilt modules wiring domain repositories to implementations
-  - DI for dispatchers, storage, network, and session token manager
-- `core:storage`
-  - `FileRepository` implementing `StorageRepository` and `StorageAccessManager`
-  - `SafDataSource` using SAF + `DocumentFile` for folder selection and file IO
-  - `MediaStoreDataSource` to query media files as a fallback
-- `core:network`
-  - `LocalHttpServer` wrapper around NanoHTTPD
-  - Controllers:
-    - `StaticAssetController` (serves web UI)
-    - `FileController` (list/download)
-    - `UploadController` (upload + progress)
-    - `ZipController` (ZIP download)
-    - `HealthController` (health checks)
-    - `PairingController` (browser ↔ app pairing)
-  - `SessionTokenManager`, `SecurityInterceptor`, `IpAddressProvider`, `QrCodeGenerator`
-- `core:service`
-  - `ForegroundServerService` Android service that hosts `LocalHttpServer`
-  - `ServiceController` / `ServerRepositoryImpl` bridging domain and service
-- `core:mvi`
-  - Lightweight MVI contracts: `MviIntent`, `MviState`, `MviEffect`, `MviViewModel`, `Reducer`
-- Feature modules
-  - `feature:permissions`
-    - Permissions MVI ViewModel & Compose UI to request media/storage
-  - `feature:dashboard`
-    - Dashboard ViewModel (MVI) orchestrating server state and QR code
-    - Dashboard screen with server controls, QR, storage folder selection, and upload progress (`UploadProgressCard`)
-  - `feature:filebrowser`
-    - File browser UI for navigating local files
-- `app`
-  - `AirBridgeApplication` with Hilt setup
-  - `MainActivity` with Compose + Navigation between permissions, dashboard, and file browser
-  - Manifest with:
-    - Main launcher activity
-    - Foreground service declaration (`ForegroundServerService`)
-    - `airbridge://pair` deep link for QR‑based browser pairing
-- `web`
-  - `build.gradle.kts` Android library to package `assets/index.html`
-  - Standalone HTML/JS/CSS for the browser UI
+- **`domain`** (Pure Kotlin): Core business logic, entities (`FileItem`, `SessionInfo`), and Use Cases.
+- **`core:mvi`**: A lightweight, reactive MVI (Model-View-Intent) framework for predictable state management.
+- **`core:network`**: Embedded HTTP server (NanoHTTPD) with custom controllers for streaming, range-based resumable uploads, and downloads.
+- **`core:storage`**: Intelligent storage abstraction that handles chunked, cancellable I/O across both `MediaStore` and SAF.
+- **`core:service`**: Manages the server lifecycle as a high-priority foreground process with CPU protection.
+- **`feature:*`**: Decoupled UI modules (Dashboard, File Browser, Permissions) using **Jetpack Compose** and **Hilt**.
+- **`web`**: A modern, single-page web application served directly from the device assets.
+
+Tech Stack & Best Practices
+---------------------------
+
+- **Language**: 100% Kotlin with Coroutines and Flows for asynchronous excellence.
+- **UI**: Jetpack Compose with **Immutable Collections** (`kotlinx-collections-immutable`) to eliminate unnecessary recompositions.
+- **Architecture**: Multi-module Clean Architecture + MVI.
+- **Dependency Injection**: Hilt (Dagger) for robust and scalable DI.
+- **Platform**: Targets API 36, leveraging the latest Android security and performance APIs.
+- **Principles**: Strictly adheres to **SOLID** principles and modern Android development patterns.
 
 What Works Today
 ----------------
 
-- App launches into a permissions flow and requests the correct media/storage permissions for the current Android version.
-- User can:
-  - Select a SAF folder where uploads will be saved.
-  - Start/stop the local HTTP server from the dashboard.
-  - See the server IP and port.
-  - Show a QR code and copy the full URL (including token) for browser access.
-  - Browse files on the device via the file browser feature.
-- Browser can:
-  - Open `http://<phone-ip>:8080/` and load the SPA web UI.
-  - See directory contents and download files from the phone.
-  - Upload multiple files in parallel with progress bars.
-- On the Android side:
-  - Selected SAF folder is persisted across app restarts.
-  - Uploaded files are written into the chosen SAF folder.
-  - A per‑file upload progress card shows status (uploading/completed/error).
-  - Foreground service uses a proper notification and special‑use foreground declaration for Android 14+.
-
-Current Issues / Limitations
-----------------------------
-
-- Upload behavior
-  - Live progress in the app is limited by NanoHTTPD buffering behavior; the browser shows true network progress, while the app currently tracks the server’s disk write into SAF, so the in‑app progress may feel delayed.
-  - Large uploads (e.g. big videos) are sensitive to timeouts and device conditions; there are still edge cases where files can be truncated or the UI may briefly blank if the upload or write fails.
-- Permissions
-  - Flow is tuned for Play Store‑friendly media access (no MANAGE_EXTERNAL_STORAGE), so full arbitrary path access is intentionally limited to the selected SAF folder.
-- Web pairing
-  - Deep‑link based pairing (browser QR → app) is wired but not heavily hardened for all edge cases and browser/device combinations.
-- Observability
-  - Logging is focused on debugging; there is no structured telemetry or crash reporting service integrated yet.
-- Testing
-  - No unit tests, integration tests, or UI tests have been added; coverage is effectively 0%.
-
-Recommended Improvements
-------------------------
-
-- Upload robustness
-  - Implement a streaming upload pipeline that doesn’t rely on NanoHTTPD buffering a full temp file before passing control to Kotlin.
-  - Add resumable or chunked uploads for very large files.
-  - Improve error propagation so the app UI can clearly distinguish between network, timeout, and SAF write failures.
-- UX / UI
-  - Smooth out permission flows across OEMs and Android versions, with clearer in‑app explanations.
-  - Refine the dashboard layout for very long upload lists (virtualized list, grouping, filters).
-  - Improve web UI for mobile browsers and add dark‑mode toggling on the browser side.
-- Architecture / Code Quality
-  - Add proper unit tests for:
-    - Use cases (domain)
-    - Repositories (storage, network, service)
-    - ViewModels (permissions, dashboard, file browser)
-  - Add UI tests for the main flows: permissions → dashboard → start server → upload/download.
-  - Harden `core:network` controllers with better input validation and more explicit error models.
-- Tooling / Production Readiness
-  - Add CI (GitHub Actions) for lint, tests, and release builds.
-  - Integrate crash reporting (e.g. Firebase Crashlytics or Sentry).
-  - Integrate dependency scanning (e.g. OWASP, Dependabot) and license checks.
+- **Instant Start**: Launch, grant permissions, and start sharing immediately using the default "AirBridge" folder.
+- **Parallel Processing**: Browser can push multiple large files at once; the phone UI tracks each one individually in real-time.
+- **Resumable Transfers**: Start an upload, pause it from either side, or even close the browser—re-opening and selecting the same file will resume exactly from the last byte.
+- **Full Control**: Independent Pause/Play and Cancel buttons for every file in the transfer list.
+- **Secure by Design**: Token-based authentication and LAN-only access ensure your data stays private and local.
 
 Build & Run
 -----------
 
-Prerequisites:
+- **IDE**: Android Studio (Ladybug or newer)
+- **JDK**: 17+
+- **Min SDK**: 31 (Android 12)
+- **Target SDK**: 36 (Android 16 Preview)
 
-- Android Studio (Hedgehog or newer) with AGP 9.x and JDK 17
-- Android device or emulator on the same LAN as the browser client
-
-Steps:
-
-1. Sync Gradle:
-   - Open the project in Android Studio and let it sync, or run:
-     - `./gradlew :app:assembleDebug`
-2. Install and run:
-   - From Android Studio: Run the `app` configuration.
-   - Or via CLI:
-     - `adb install -r app/build/outputs/apk/debug/app-debug.apk`
-3. Use the app:
-   - Grant media/storage permissions.
-   - Select a storage folder via “Select Storage Folder”.
-   - Tap “Start Server” on the dashboard.
-   - On your computer, open the shown URL (or scan the QR / use “Copy URL”) in a browser.
-   - Use the web UI to browse, upload, and download files.
+1. **Sync**: `./gradlew :app:assembleDebug`
+2. **Run**: Deploy to any physical device on your local Wi-Fi.
+3. **Connect**: Tap "Start Server," scan the QR code on your computer, and start sharing.
 
 Security Notes
 --------------
 
-- The server only accepts LAN traffic (enforced by `SecurityInterceptor`).
-- Access is protected by a random session token included in the URL.
-- No data leaves your local network; there is no cloud backend.
+- **Local Only**: All traffic is restricted to your local network via a `SecurityInterceptor`.
+- **Session Auth**: Every connection requires a unique, randomly generated session token.
+- **No Cloud**: Your files never touch a server outside your own device and computer.

@@ -9,36 +9,45 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
-import com.swaran.airbridge.feature.dashboard.DashboardScreen
-import com.swaran.airbridge.feature.filebrowser.FileBrowserScreen
-import com.swaran.airbridge.feature.permissions.PermissionScreen
+import com.swaran.airbridge.feature.dashboard.DashboardRoute
+import com.swaran.airbridge.feature.filebrowser.FileBrowserRoute
+import com.swaran.airbridge.feature.permissions.ui.PermissionRoute
+
+/**
+ * Sealed class representing navigation routes in the app.
+ */
+sealed class Route(val route: String) {
+    data object Permissions : Route("permissions")
+    data object Dashboard : Route("dashboard")
+    data object FileBrowser : Route("filebrowser")
+}
 
 @Composable
 fun MainNavHost() {
     val navController = rememberNavController()
     val context = LocalContext.current
 
-    NavHost(navController = navController, startDestination = "permissions") {
-        composable("permissions") {
-            PermissionScreen(
+    NavHost(navController = navController, startDestination = Route.Permissions.route) {
+        composable(Route.Permissions.route) {
+            PermissionRoute(
                 onNavigateToDashboard = { 
-                    navController.navigate("dashboard") { 
-                        popUpTo("permissions") { inclusive = true } 
+                    navController.navigate(Route.Dashboard.route) { 
+                        popUpTo(Route.Permissions.route) { inclusive = true } 
                     } 
                 },
                 onNavigateToSettings = { openAppSettings(context) }
             )
         }
         
-        composable("dashboard") {
-            DashboardScreen(
-                onNavigateToFileBrowser = { navController.navigate("filebrowser") },
-                onNavigateToPermissions = { navController.navigate("permissions") }
+        composable(Route.Dashboard.route) {
+            DashboardRoute(
+                onNavigateToFileBrowser = { navController.navigate(Route.FileBrowser.route) },
+                onNavigateToPermissions = { navController.navigate(Route.Permissions.route) }
             )
         }
         
-        composable("filebrowser") {
-            FileBrowserScreen(
+        composable(Route.FileBrowser.route) {
+            FileBrowserRoute(
                 onNavigateBack = { navController.popBackStack() }
             )
         }

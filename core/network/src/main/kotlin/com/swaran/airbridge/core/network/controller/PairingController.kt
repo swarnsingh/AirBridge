@@ -1,11 +1,17 @@
 package com.swaran.airbridge.core.network.controller
 
-import com.google.gson.Gson
+import org.json.JSONObject
+import com.swaran.airbridge.core.common.AirDispatchers
+import com.swaran.airbridge.core.common.Dispatcher
 import com.swaran.airbridge.core.network.LocalHttpServer
 import com.swaran.airbridge.core.network.SessionTokenManager
 import fi.iki.elonen.NanoHTTPD
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import java.util.UUID
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -20,11 +26,12 @@ data class PairingSession(
 @Singleton
 class PairingController @Inject constructor(
     server: LocalHttpServer,
-    private val sessionTokenManager: SessionTokenManager
+    private val sessionTokenManager: SessionTokenManager,
+    @Dispatcher(AirDispatchers.IO) private val ioDispatcher: CoroutineDispatcher
 ) : LocalHttpServer.RequestHandler {
 
     private val pairingSessions = ConcurrentHashMap<String, PairingSession>()
-    private val gson = Gson()
+    private val scope = CoroutineScope(SupervisorJob() + ioDispatcher)
 
     init {
         server.registerHandler(this)
@@ -40,11 +47,7 @@ class PairingController @Inject constructor(
             session.uri == "/api/pair/request" && session.method == NanoHTTPD.Method.POST -> handlePairRequest()
             session.uri.startsWith("/api/pair/status") && session.method == NanoHTTPD.Method.GET -> handleStatusCheck(session)
             session.uri == "/api/pair/approve" && session.method == NanoHTTPD.Method.POST -> handleApprove(session)
-            else -> NanoHTTPD.newFixedLengthResponse(
-                NanoHTTPD.Response.Status.NOT_FOUND,
-                "application/json",
-                gson.toJson(mapOf("error" to "Not found"))
-            )
+            else -> notFound()
         }
     }
 
@@ -53,107 +56,64 @@ class PairingController @Inject constructor(
         val pairingSession = PairingSession(id = pairingId)
         pairingSessions[pairingId] = pairingSession
 
-        return NanoHTTPD.newFixedLengthResponse(
-            NanoHTTPD.Response.Status.OK,
-            "application/json",
-            gson.toJson(mapOf("pairingId" to pairingId))
-        )
+        return jsonResponse(JSONObject().put("pairingId", pairingId))
     }
 
     private fun handleStatusCheck(session: NanoHTTPD.IHTTPSession): NanoHTTPD.Response {
-        val pairingId = session.parameters["id"]?.firstOrNull()
-        
-        if (pairingId == null) {
-            return NanoHTTPD.newFixedLengthResponse(
-                NanoHTTPD.Response.Status.BAD_REQUEST,
-                "application/json",
-                gson.toJson(mapOf("error" to "Missing pairing ID"))
-            )
-        }
+        val pairingId = session.parameters["id"]?.firstOrNull() ?: return badRequest("Missing pairing ID")
+        val pairingSession = pairingSessions[pairingId] ?: return notFound("Pairing session not found")
 
-        val pairingSession = pairingSessions[pairingId]
-        if (pairingSession == null) {
-            return NanoHTTPD.newFixedLengthResponse(
-                NanoHTTPD.Response.Status.NOT_FOUND,
-                "application/json",
-                gson.toJson(mapOf("error" to "Pairing session not found"))
-            )
-        }
-
-        return NanoHTTPD.newFixedLengthResponse(
-            NanoHTTPD.Response.Status.OK,
-            "application/json",
-            gson.toJson(mapOf(
-                "approved" to pairingSession.approved,
-                "token" to pairingSession.token
-            ))
-        )
+        return jsonResponse(JSONObject().apply {
+            put("approved", pairingSession.approved)
+            put("token", pairingSession.token ?: JSONObject.NULL)
+        })
     }
 
     private fun handleApprove(session: NanoHTTPD.IHTTPSession): NanoHTTPD.Response {
         val body = mutableMapOf<String, String>()
         session.parseBody(body)
-        val content = body["postData"] ?: return NanoHTTPD.newFixedLengthResponse(
-            NanoHTTPD.Response.Status.BAD_REQUEST,
-            "application/json",
-            gson.toJson(mapOf("error" to "Missing body"))
-        )
+        val content = body["postData"] ?: return badRequest("Missing body")
 
-        val request = try {
-            gson.fromJson(content, Map::class.java)
-        } catch (e: Exception) {
-            return NanoHTTPD.newFixedLengthResponse(
-                NanoHTTPD.Response.Status.BAD_REQUEST,
-                "application/json",
-                gson.toJson(mapOf("error" to "Invalid JSON"))
-            )
+        val request = try { JSONObject(content) } catch (e: Exception) { return badRequest("Invalid JSON") }
+        val pairingId = request.optString("pairingId", null) ?: return badRequest("Missing pairing ID")
+        val pairingSession = pairingSessions[pairingId] ?: return notFound("Pairing session not found")
+
+        val future = CompletableFuture<NanoHTTPD.Response>()
+        scope.launch {
+            try {
+                val sessionInfo = sessionTokenManager.generateSession()
+                pairingSession.approved = true
+                pairingSession.token = sessionInfo.token
+                future.complete(jsonResponse(JSONObject().put("success", true)))
+            } catch (e: Exception) {
+                future.complete(errorResponse("Approval failed: ${e.message}"))
+            }
         }
 
-        val pairingId = request["pairingId"] as? String
-        if (pairingId == null) {
-            return NanoHTTPD.newFixedLengthResponse(
-                NanoHTTPD.Response.Status.BAD_REQUEST,
-                "application/json",
-                gson.toJson(mapOf("error" to "Missing pairing ID"))
-            )
-        }
-
-        val pairingSession = pairingSessions[pairingId]
-        if (pairingSession == null) {
-            return NanoHTTPD.newFixedLengthResponse(
-                NanoHTTPD.Response.Status.NOT_FOUND,
-                "application/json",
-                gson.toJson(mapOf("error" to "Pairing session not found"))
-            )
-        }
-
-        // Generate new session token
-        val sessionInfo = runBlocking { sessionTokenManager.generateSession() }
-
-        // Approve pairing
-        pairingSession.approved = true
-        pairingSession.token = sessionInfo.token
-
-        return NanoHTTPD.newFixedLengthResponse(
-            NanoHTTPD.Response.Status.OK,
-            "application/json",
-            gson.toJson(mapOf("success" to true))
-        )
+        return try { future.get() } catch (e: Exception) { errorResponse("Approval timeout") }
     }
 
     private fun startCleanupTask() {
-        Thread {
+        scope.launch {
             while (true) {
-                try {
-                    Thread.sleep(60_000) // 1 minute
-                    val now = System.currentTimeMillis()
-                    pairingSessions.entries.removeIf { (_, session) ->
-                        now - session.createdAt > 5 * 60 * 1000 // 5 minutes
-                    }
-                } catch (e: InterruptedException) {
-                    break
+                kotlinx.coroutines.delay(60_000)
+                val now = System.currentTimeMillis()
+                pairingSessions.entries.removeIf { (_, session) ->
+                    now - session.createdAt > 5 * 60 * 1000 // 5 minutes
                 }
             }
-        }.start()
+        }
     }
+
+    private fun jsonResponse(obj: JSONObject): NanoHTTPD.Response =
+        NanoHTTPD.newFixedLengthResponse(NanoHTTPD.Response.Status.OK, "application/json", obj.toString())
+
+    private fun errorResponse(msg: String): NanoHTTPD.Response =
+        NanoHTTPD.newFixedLengthResponse(NanoHTTPD.Response.Status.INTERNAL_ERROR, "application/json", JSONObject().put("error", msg).toString())
+
+    private fun badRequest(msg: String): NanoHTTPD.Response =
+        NanoHTTPD.newFixedLengthResponse(NanoHTTPD.Response.Status.BAD_REQUEST, "application/json", JSONObject().put("error", msg).toString())
+
+    private fun notFound(msg: String = "Not Found"): NanoHTTPD.Response =
+        NanoHTTPD.newFixedLengthResponse(NanoHTTPD.Response.Status.NOT_FOUND, "application/json", JSONObject().put("error", msg).toString())
 }

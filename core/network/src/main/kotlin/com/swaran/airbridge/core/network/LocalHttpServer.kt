@@ -1,10 +1,9 @@
 package com.swaran.airbridge.core.network
 
 import android.content.Context
+import android.util.Log
 import dagger.hilt.android.qualifiers.ApplicationContext
 import fi.iki.elonen.NanoHTTPD
-import java.io.ByteArrayInputStream
-import java.io.InputStream
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -18,7 +17,9 @@ class LocalHttpServer @Inject constructor(
     private val handlers = mutableListOf<RequestHandler>()
 
     companion object {
-        private const val SOCKET_READ_TIMEOUT = 60_000
+        private const val TAG = "LocalHttpServer"
+        // 5 minutes - needs to be long enough for large file uploads over WiFi
+        private const val SOCKET_READ_TIMEOUT = 300_000
     }
 
     fun start(port: Int): Boolean {
@@ -40,11 +41,29 @@ class LocalHttpServer @Inject constructor(
                             MIME_PLAINTEXT,
                             "Not Found"
                         )
-                    return handler.handle(session)
+                    val response = handler.handle(session)
+
+                    // ── Disable NanoHTTPD auto-gzip ──────────────────────────────────────────
+                    // NanoHTTPD 2.3.1 HTTPSession.execute() calls r.setGzipEncoding(true) on
+                    // every 200 OK response when Accept-Encoding contains "gzip". This causes
+                    // the browser to receive gzip-encoded bytes and fail to parse them as JSON.
+                    //
+                    // Fix: Replace the status with a custom IStatus instance so that the check
+                    //   Response.Status.OK.equals(r.getStatus())
+                    // returns false (enum identity check fails for our custom object), so
+                    // setGzipEncoding(true) is never called. All headers/body are preserved.
+                    val originalStatus = response.status
+                    response.status = object : Response.IStatus {
+                        override fun getDescription(): String = originalStatus.description
+                        override fun getRequestStatus(): Int = originalStatus.requestStatus
+                    }
+
+                    return response
                 }
             }.apply { start(SOCKET_READ_TIMEOUT, false) }
             true
         } catch (e: Exception) {
+            Log.e(TAG, "Failed to start server on port $port", e)
             false
         }
     }

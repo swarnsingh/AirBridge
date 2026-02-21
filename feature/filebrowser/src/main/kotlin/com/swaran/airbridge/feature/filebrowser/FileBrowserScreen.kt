@@ -1,59 +1,61 @@
 package com.swaran.airbridge.feature.filebrowser
 
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.InsertDriveFile
-import androidx.compose.material3.Card
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.tooling.preview.PreviewParameter
+import androidx.compose.ui.tooling.preview.PreviewParameterProvider
 import androidx.compose.ui.unit.dp
-import androidx.hilt.navigation.compose.hiltViewModel
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.swaran.airbridge.domain.model.FileItem
+import com.swaran.airbridge.feature.filebrowser.mvi.FileBrowserState
+import kotlinx.collections.immutable.persistentListOf
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+/**
+ * Screen composable for browsing files and folders.
+ *
+ * @param state Current state of the file browser
+ * @param onNavigateUp Callback to navigate to parent directory
+ * @param onNavigateToFolder Callback to navigate into a folder
+ * @param onSelectFile Callback when a file is selected
+ * @param onNavigateBack Callback to navigate back from this feature
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FileBrowserScreen(
-    viewModel: FileBrowserViewModel = hiltViewModel(),
-    onNavigateBack: () -> Unit = {}
+    state: FileBrowserState,
+    onNavigateUp: () -> Unit,
+    onNavigateToFolder: (String) -> Unit,
+    onSelectFile: (FileItem) -> Unit,
+    onNavigateBack: () -> Unit
 ) {
-    val state by viewModel.state.collectAsStateWithLifecycle()
-
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text(stringResource(id = R.string.files)) },
                 navigationIcon = {
                     if (state.currentPath != "/") {
-                        IconButton(onClick = { viewModel.sendIntent(FileBrowserIntent.NavigateUp) }) {
+                        IconButton(onClick = onNavigateUp) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = stringResource(id = R.string.go_back)
+                            )
+                        }
+                    } else {
+                         IconButton(onClick = onNavigateBack) {
                             Icon(
                                 imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                                 contentDescription = stringResource(id = R.string.go_back)
@@ -77,10 +79,10 @@ fun FileBrowserScreen(
                 }
                 state.files.isEmpty() -> {
                     Text(
-                    text = stringResource(id = R.string.no_files),
-                    modifier = Modifier.align(Alignment.Center),
-                    style = MaterialTheme.typography.bodyLarge
-                )
+                        text = stringResource(id = R.string.no_files),
+                        modifier = Modifier.align(Alignment.Center),
+                        style = MaterialTheme.typography.bodyLarge
+                    )
                 }
                 else -> {
                     LazyColumn(
@@ -94,14 +96,14 @@ fun FileBrowserScreen(
                             )
                         }
 
-                        items(state.files) { file ->
+                        items(state.files, key = { it.id }) { file ->
                             FileItemRow(
                                 file = file,
                                 onClick = {
                                     if (file.isDirectory) {
-                                        viewModel.sendIntent(FileBrowserIntent.NavigateToFolder(file.path))
+                                        onNavigateToFolder(file.path)
                                     } else {
-                                        viewModel.sendIntent(FileBrowserIntent.SelectFile(file))
+                                        onSelectFile(file)
                                     }
                                 }
                             )
@@ -181,4 +183,35 @@ private fun formatFileSize(size: Long): String {
 private fun formatDate(timestamp: Long): String {
     val sdf = SimpleDateFormat("MMM dd, yyyy", Locale.getDefault())
     return sdf.format(Date(timestamp))
+}
+
+class FileBrowserStateProvider : PreviewParameterProvider<FileBrowserState> {
+    override val values = sequenceOf(
+        FileBrowserState(isLoading = true),
+        FileBrowserState(files = persistentListOf()),
+        FileBrowserState(
+            files = persistentListOf(
+                FileItem("1", "Documents", "/", 0, "", true, System.currentTimeMillis(), null),
+                FileItem("2", "image.jpg", "/image.jpg", 1024 * 500, "image/jpeg", false, System.currentTimeMillis(), null),
+                FileItem("3", "video.mp4", "/video.mp4", 1024 * 1024 * 10, "video/mp4", false, System.currentTimeMillis(), null)
+            ),
+            currentPath = "/Download"
+        )
+    )
+}
+
+@Preview(showBackground = true)
+@Composable
+fun FileBrowserScreenPreview(
+    @PreviewParameter(FileBrowserStateProvider::class) state: FileBrowserState
+) {
+    MaterialTheme {
+        FileBrowserScreen(
+            state = state,
+            onNavigateUp = {},
+            onNavigateToFolder = {},
+            onSelectFile = {},
+            onNavigateBack = {}
+        )
+    }
 }

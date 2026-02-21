@@ -1,42 +1,45 @@
 [versions]
-compileSdk = "35"
-minSdk = "26"
-targetSdk = "35"
+compileSdk = "36"
+minSdk = "31"
+targetSdk = "36"
 java = "17"
-agp = "9.0.0"
-kotlin = "2.1.0"
-ksp = "2.1.0-1.0.29"
-coroutines = "1.10.1"
+agp = "9.0.1"
+kotlin = "2.3.10"
+ksp = "2.3.2"
+coroutines = "1.10.2"
 
 # AndroidX
-coreKtx = "1.15.0"
-lifecycle = "2.8.7"
-activityCompose = "1.9.3"
-appcompat = "1.7.0"
-documentfile = "1.0.1"
+coreKtx = "1.17.0"
+lifecycle = "2.10.0"
+activityCompose = "1.12.4"
+appcompat = "1.7.1"
+documentfile = "1.1.0"
 
 # Compose
-composeBom = "2025.01.00"
+composeBom = "2026.02.00"
 
 # Material
-material = "1.12.0"
-material3 = "1.3.1"
+material = "1.13.0"
+material3 = "1.4.0"
 
 # DI
-hilt = "2.59.1"
-hiltNavigationCompose = "1.2.0"
+hilt = "2.59.2"
+hiltNavigationCompose = "1.3.0"
 
 # Network
 nanohttpd = "2.3.1"
-gson = "2.11.0"
+gson = "2.13.2"
 
 # QR
-zxing = "3.5.3"
+zxing = "3.5.4"
+
+# Immutable Collections
+kotlinxImmutable = "0.4.0"
 
 # Testing
 junit = "4.13.2"
-junitVersion = "1.2.1"
-espressoCore = "3.6.1"
+junitVersion = "1.3.0"
+espressoCore = "3.7.0"
 
 [libraries]
 # Core
@@ -75,6 +78,9 @@ gson = { group = "com.google.code.gson", name = "gson", version.ref = "gson" }
 
 # QR
 zxing-core = { group = "com.google.zxing", name = "core", version.ref = "zxing" }
+
+# Immutable Collections
+kotlinx-collections-immutable = { group = "org.jetbrains.kotlinx", name = "kotlinx-collections-immutable", version.ref = "kotlinxImmutable" }
 
 # Testing
 junit = { group = "junit", name = "junit", version.ref = "junit" }
