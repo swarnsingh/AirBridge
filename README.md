@@ -73,3 +73,8 @@ Security Notes
 - **Local Only**: All traffic is restricted to your local network via a `SecurityInterceptor`.
 - **Session Auth**: Every connection requires a unique, randomly generated session token.
 - **No Cloud**: Your files never touch a server outside your own device and computer.
+
+Known Issues
+------------
+
+- **Resume not working correctly**: File resume functionality is currently unreliable. When resuming a paused upload, the transfer may restart from the beginning instead of continuing from the paused position. This is being actively investigated.
