@@ -4,7 +4,7 @@ AirBridge
 Overview
 --------
 
-AirBridge is a robust, high‑performance Android LAN file‑sharing app that transforms your device into a local HTTP server. It enables seamless, lightning-fast file transfers between your phone and any browser on the same Wi‑Fi network. Built with modern Android standards, it features a foreground service, parallel resumable upload support, and a responsive web UI—all without requiring any cloud backend or internet connection.
+qAirBridge is a robust, high‑performance Android LAN file‑sharing app that transforms your device into a local HTTP server. It enables seamless, lightning-fast file transfers between your phone and any browser on the same Wi‑Fi network. Built with modern Android standards, it features a foreground service, parallel resumable upload support, and a responsive web UI—all without requiring any cloud backend or internet connection.
 
 Key Features
 -----------
@@ -77,4 +77,8 @@ Security Notes
 Known Issues
 ------------
 
-- **Resume not working correctly**: File resume functionality is currently unreliable. When resuming a paused upload, the transfer may restart from the beginning instead of continuing from the paused position. This is being actively investigated.
+- **Bidirectional Pause/Resume Timing**: When pausing from one device (browser or phone) and attempting to resume from the other, there can be a 2-4 second delay before the sync loop detects the state change. During this window, clicking resume may not respond. Wait for the status indicator to update before clicking resume.
+
+- **Large File Progress**: For files >100MB, the progress bar may appear to stall at 99% briefly while the final buffer is flushed. This is normal and the transfer will complete.
+
+- **Network Interruptions**: If Wi-Fi disconnects during upload, the transfer will show "Error" rather than "Interrupted". You can still resume by selecting the same file again.
