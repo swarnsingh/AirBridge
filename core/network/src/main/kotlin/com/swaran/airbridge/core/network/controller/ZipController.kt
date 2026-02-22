@@ -1,99 +1,79 @@
 package com.swaran.airbridge.core.network.controller
 
+import com.swaran.airbridge.core.common.AirDispatchers
+import com.swaran.airbridge.core.common.Dispatcher
 import com.swaran.airbridge.core.network.LocalHttpServer
 import com.swaran.airbridge.core.network.SessionTokenManager
 import com.swaran.airbridge.domain.repository.StorageRepository
 import fi.iki.elonen.NanoHTTPD
-import kotlinx.coroutines.runBlocking
-import java.io.ByteArrayInputStream
-import java.io.ByteArrayOutputStream
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import java.io.PipedInputStream
+import java.io.PipedOutputStream
+import java.util.concurrent.CompletableFuture
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import javax.inject.Inject
+import javax.inject.Singleton
 
+@Singleton
 class ZipController @Inject constructor(
     private val storageRepository: StorageRepository,
     private val sessionTokenManager: SessionTokenManager,
+    @Dispatcher(AirDispatchers.IO) private val ioDispatcher: CoroutineDispatcher,
     server: LocalHttpServer
 ) : LocalHttpServer.RequestHandler {
+
+    private val scope = CoroutineScope(SupervisorJob() + ioDispatcher)
 
     init {
         server.registerHandler(this)
     }
 
-    override fun canHandle(session: NanoHTTPD.IHTTPSession): Boolean {
-        return session.uri.startsWith("/api/zip")
-    }
+    override fun canHandle(session: NanoHTTPD.IHTTPSession): Boolean =
+        session.uri.startsWith("/api/zip")
 
     override fun handle(session: NanoHTTPD.IHTTPSession): NanoHTTPD.Response {
-        val token = session.parameters["token"]?.firstOrNull()
-            ?: return NanoHTTPD.newFixedLengthResponse(
-                NanoHTTPD.Response.Status.UNAUTHORIZED,
-                NanoHTTPD.MIME_PLAINTEXT,
-                "Unauthorized"
-            )
+        val token = session.parameters["token"]?.firstOrNull() ?: return unauthorized()
+        if (!sessionTokenManager.validateSession(token)) return unauthorized()
 
-        if (!sessionTokenManager.validateSession(token)) {
-            return NanoHTTPD.newFixedLengthResponse(
-                NanoHTTPD.Response.Status.UNAUTHORIZED,
-                NanoHTTPD.MIME_PLAINTEXT,
-                "Invalid session"
-            )
-        }
+        val ids = session.parameters["ids"]?.firstOrNull()?.split(",")?.filter { it.isNotEmpty() } ?: emptyList()
+        if (ids.isEmpty()) return badRequest("No files selected")
 
-        val ids = session.parameters["ids"]?.firstOrNull()
-            ?.split(",")
-            ?.filter { it.isNotEmpty() }
-            ?: emptyList()
+        // USE PIPED STREAMS FOR MEMORY EFFICIENCY
+        // This avoids building the entire ZIP in memory (preventing OOM)
+        val pipedIn = PipedInputStream()
+        val pipedOut = PipedOutputStream(pipedIn)
 
-        if (ids.isEmpty()) {
-            return NanoHTTPD.newFixedLengthResponse(
-                NanoHTTPD.Response.Status.BAD_REQUEST,
-                NanoHTTPD.MIME_PLAINTEXT,
-                "No files selected"
-            )
-        }
-
-        return runBlocking {
+        scope.launch {
             try {
-                val zipBytes = createZip(ids)
-                val response = NanoHTTPD.newFixedLengthResponse(
-                    NanoHTTPD.Response.Status.OK,
-                    "application/zip",
-                    ByteArrayInputStream(zipBytes),
-                    zipBytes.size.toLong()
-                )
-                response.addHeader("Content-Disposition", "attachment; filename=\"AirBridge-Download.zip\"")
-                response
-            } catch (e: Exception) {
-                NanoHTTPD.newFixedLengthResponse(
-                    NanoHTTPD.Response.Status.INTERNAL_ERROR,
-                    NanoHTTPD.MIME_PLAINTEXT,
-                    "Failed to create ZIP: ${e.message}"
-                )
-            }
-        }
-    }
-
-    private suspend fun createZip(fileIds: List<String>): ByteArray {
-        val baos = ByteArrayOutputStream()
-        ZipOutputStream(baos).use { zos ->
-            fileIds.forEach { id ->
-                val fileResult = storageRepository.getFile(id)
-                if (fileResult.isSuccess) {
-                    val file = fileResult.getOrNull() ?: return@forEach
-                    val streamResult = storageRepository.downloadFile(id)
-                    if (streamResult.isSuccess) {
-                        val entry = ZipEntry(file.name)
-                        zos.putNextEntry(entry)
-                        streamResult.getOrNull()?.use { input ->
+                ZipOutputStream(pipedOut).use { zos ->
+                    ids.forEach { id ->
+                        val file = storageRepository.getFile(id).getOrNull() ?: return@forEach
+                        storageRepository.downloadFile(id).getOrNull()?.use { input ->
+                            zos.putNextEntry(ZipEntry(file.name))
                             input.copyTo(zos)
+                            zos.closeEntry()
                         }
-                        zos.closeEntry()
                     }
                 }
+            } catch (e: Exception) {
+                // Pipe will break and NanoHTTPD will handle the partial stream closure gracefully
+            } finally {
+                try { pipedOut.close() } catch (_: Exception) {}
             }
         }
-        return baos.toByteArray()
+
+        val response = NanoHTTPD.newChunkedResponse(NanoHTTPD.Response.Status.OK, "application/zip", pipedIn)
+        response.addHeader("Content-Disposition", "attachment; filename=\"AirBridge-Download.zip\"")
+        return response
     }
+
+    private fun unauthorized(): NanoHTTPD.Response =
+        NanoHTTPD.newFixedLengthResponse(NanoHTTPD.Response.Status.UNAUTHORIZED, NanoHTTPD.MIME_PLAINTEXT, "Unauthorized")
+
+    private fun badRequest(msg: String): NanoHTTPD.Response =
+        NanoHTTPD.newFixedLengthResponse(NanoHTTPD.Response.Status.BAD_REQUEST, NanoHTTPD.MIME_PLAINTEXT, msg)
 }

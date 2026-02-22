@@ -1,29 +1,29 @@
 package com.swaran.airbridge.core.network.controller
 
+import com.swaran.airbridge.core.common.AirDispatchers
+import com.swaran.airbridge.core.common.Dispatcher
 import com.swaran.airbridge.core.network.LocalHttpServer
 import com.swaran.airbridge.core.network.SessionTokenManager
 import com.swaran.airbridge.domain.model.FileItem
 import com.swaran.airbridge.domain.repository.StorageRepository
 import fi.iki.elonen.NanoHTTPD
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.concurrent.CompletableFuture
 import javax.inject.Inject
 
-/**
- * Controller for file operations.
- *
- * Handles file browsing, downloading, and listing.
- *
- * @param storageRepository Repository for file storage operations
- * @param sessionTokenManager Manager for session validation
- * @param server Local HTTP server instance
- */
 class FileController @Inject constructor(
     private val storageRepository: StorageRepository,
     private val sessionTokenManager: SessionTokenManager,
+    @Dispatcher(AirDispatchers.IO) private val ioDispatcher: CoroutineDispatcher,
     server: LocalHttpServer
 ) : LocalHttpServer.RequestHandler {
+
+    private val scope = CoroutineScope(SupervisorJob() + ioDispatcher)
 
     init {
         server.registerHandler(this)
@@ -37,122 +37,108 @@ class FileController @Inject constructor(
     }
 
     override fun handle(session: NanoHTTPD.IHTTPSession): NanoHTTPD.Response {
-        val token = session.parameters["token"]?.firstOrNull()
-            ?: return unauthorized()
-
-        if (!sessionTokenManager.validateSession(token)) {
-            return unauthorized()
-        }
+        val token = session.parameters["token"]?.firstOrNull() ?: return unauthorized()
+        if (!sessionTokenManager.validateSession(token)) return unauthorized()
 
         return when {
             session.uri.startsWith("/api/browse") -> handleBrowse(session)
             session.uri.startsWith("/api/download") -> handleDownload(session)
             session.uri.startsWith("/api/files") -> {
-                // If 'id' param is present, treat as file download for backward compatibility
-                // Otherwise treat as browse/list files
-                if (session.parameters["id"] != null) {
-                    handleDownload(session)
-                } else {
-                    handleBrowse(session)
-                }
+                if (session.parameters["id"] != null) handleDownload(session) else handleBrowse(session)
             }
-
             else -> notFound()
         }
     }
 
-    /**
-     * Handles file browsing/listing requests.
-     *
-     * Endpoint: GET /api/browse?path=/&token=...
-     *           GET /api/files?path=/&token=...
-     */
     private fun handleBrowse(session: NanoHTTPD.IHTTPSession): NanoHTTPD.Response {
         val path = session.parameters["path"]?.firstOrNull() ?: "/"
+        val future = CompletableFuture<NanoHTTPD.Response>()
 
-        return runBlocking {
-            storageRepository.browseFiles(path)
-                .fold(
-                    onSuccess = { files ->
-                        jsonResponse(files)
-                    },
-                    onFailure = { error ->
-                        errorResponse(error.message ?: "Unknown error")
-                    }
-                )
+        scope.launch {
+            storageRepository.browseFiles(path).fold(
+                onSuccess = { future.complete(jsonResponse(it)) },
+                onFailure = { future.complete(errorResponse(it.message ?: "Browse failed")) }
+            )
         }
+        return try { future.get() } catch (e: Exception) { errorResponse("Browse failed") }
     }
 
-    /**
-     * Handles file download requests.
-     *
-     * Endpoint: GET /api/download?id=...&token=...
-     *           GET /api/files?id=...&token=...
-     */
     private fun handleDownload(session: NanoHTTPD.IHTTPSession): NanoHTTPD.Response {
-        // Support both /api/download/${id} and /api/download?id=... patterns
         val fileId = session.parameters["id"]?.firstOrNull()
             ?: session.uri.substringAfter("/api/download/").takeIf { it.isNotBlank() }
             ?: return errorResponse("Missing file id")
 
-        return runBlocking {
-            storageRepository.downloadFile(fileId)
-                .fold(
-                    onSuccess = { stream ->
-                        NanoHTTPD.newChunkedResponse(
+        val future = CompletableFuture<NanoHTTPD.Response>()
+
+        scope.launch {
+            val fileResult = storageRepository.getFile(fileId)
+            val fileItem = fileResult.getOrNull() ?: run {
+                future.complete(errorResponse("File not found"))
+                return@launch
+            }
+
+            storageRepository.downloadFile(fileId).fold(
+                onSuccess = { inputStream ->
+                    val rangeHeader = session.headers["range"]
+                    var response: NanoHTTPD.Response
+
+                    if (rangeHeader != null && rangeHeader.startsWith("bytes=")) {
+                        // Robust HTTP Range Support (resumable downloads)
+                        try {
+                            val range = rangeHeader.substring(6).split("-")
+                            val start = range[0].toLong()
+                            val end = if (range.size > 1 && range[1].isNotEmpty()) range[1].toLong() else fileItem.size - 1
+                            
+                            inputStream.skip(start)
+                            val contentLength = end - start + 1
+                            
+                            response = NanoHTTPD.newFixedLengthResponse(
+                                NanoHTTPD.Response.Status.PARTIAL_CONTENT,
+                                fileItem.mimeType,
+                                inputStream,
+                                contentLength
+                            )
+                            response.addHeader("Content-Range", "bytes $start-$end/${fileItem.size}")
+                        } catch (e: Exception) {
+                            response = NanoHTTPD.newFixedLengthResponse(NanoHTTPD.Response.Status.RANGE_NOT_SATISFIABLE, NanoHTTPD.MIME_PLAINTEXT, "")
+                        }
+                    } else {
+                        response = NanoHTTPD.newFixedLengthResponse(
                             NanoHTTPD.Response.Status.OK,
-                            "application/octet-stream",
-                            stream
+                            fileItem.mimeType,
+                            inputStream,
+                            fileItem.size
                         )
-                    },
-                    onFailure = { error ->
-                        errorResponse(error.message ?: "Download failed")
                     }
-                )
+                    
+                    response.addHeader("Accept-Ranges", "bytes")
+                    response.addHeader("Content-Disposition", "attachment; filename=\"${fileItem.name}\"")
+                    future.complete(response)
+                },
+                onFailure = { future.complete(errorResponse("Download failed")) }
+            )
         }
+        return try { future.get() } catch (e: Exception) { errorResponse("Initialization failed") }
     }
 
     private fun jsonResponse(files: List<FileItem>): NanoHTTPD.Response {
-        val jsonArray = JSONArray()
+        val arr = JSONArray()
         files.forEach { file ->
-            jsonArray.put(JSONObject().apply {
-                put("id", file.id)
-                put("name", file.name)
-                put("path", file.path)
-                put("size", file.size)
-                put("mimeType", file.mimeType)
-                put("isDirectory", file.isDirectory)
-                put("lastModified", file.lastModified)
+            arr.put(JSONObject().apply {
+                put("id", file.id); put("name", file.name); put("path", file.path)
+                put("size", file.size); put("mimeType", file.mimeType)
+                put("isDirectory", file.isDirectory); put("lastModified", file.lastModified)
             })
         }
-        return NanoHTTPD.newFixedLengthResponse(
-            NanoHTTPD.Response.Status.OK,
-            "application/json",
-            jsonArray.toString()
-        )
+        return NanoHTTPD.newFixedLengthResponse(NanoHTTPD.Response.Status.OK, "application/json", arr.toString())
     }
 
-    private fun errorResponse(message: String): NanoHTTPD.Response {
-        return NanoHTTPD.newFixedLengthResponse(
-            NanoHTTPD.Response.Status.INTERNAL_ERROR,
-            "application/json",
-            JSONObject().put("error", message).toString()
-        )
-    }
+    private fun errorResponse(msg: String): NanoHTTPD.Response =
+        NanoHTTPD.newFixedLengthResponse(NanoHTTPD.Response.Status.INTERNAL_ERROR, "application/json", JSONObject().put("error", msg).toString())
 
-    private fun unauthorized(): NanoHTTPD.Response {
-        return NanoHTTPD.newFixedLengthResponse(
-            NanoHTTPD.Response.Status.UNAUTHORIZED,
-            "application/json",
-            JSONObject().put("error", "Invalid or missing token").toString()
-        )
-    }
+    private fun unauthorized(): NanoHTTPD.Response =
+        NanoHTTPD.newFixedLengthResponse(NanoHTTPD.Response.Status.UNAUTHORIZED, "application/json", JSONObject().put("error", "Unauthorized").toString())
 
-    private fun notFound(): NanoHTTPD.Response {
-        return NanoHTTPD.newFixedLengthResponse(
-            NanoHTTPD.Response.Status.NOT_FOUND,
-            NanoHTTPD.MIME_PLAINTEXT,
-            "Not Found"
-        )
-    }
+    private fun notFound(): NanoHTTPD.Response =
+        NanoHTTPD.newFixedLengthResponse(NanoHTTPD.Response.Status.NOT_FOUND, NanoHTTPD.MIME_PLAINTEXT, "Not Found")
 }

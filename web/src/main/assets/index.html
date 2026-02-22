@@ -6,196 +6,30 @@
     <title>AirBridge - File Manager</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #f5f5f5;
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-        .pairing-card {
-            background: white;
-            border-radius: 20px;
-            padding: 48px;
-            text-align: center;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-            max-width: 500px;
-        }
-        h1 {
-            font-size: 32px;
-            margin-bottom: 16px;
-            color: #1a202c;
-        }
-        .subtitle {
-            color: #718096;
-            margin-bottom: 32px;
-            font-size: 16px;
-        }
-        #qrcode {
-            display: inline-block;
-            padding: 20px;
-            background: white;
-            border-radius: 12px;
-            margin: 24px 0;
-        }
-        .instructions {
-            background: #f7fafc;
-            padding: 20px;
-            border-radius: 12px;
-            margin-top: 24px;
-            text-align: left;
-        }
-        .step {
-            display: flex;
-            align-items: start;
-            margin: 12px 0;
-            gap: 12px;
-        }
-        .step-number {
-            background: #667eea;
-            color: white;
-            width: 28px;
-            height: 28px;
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-weight: 600;
-            flex-shrink: 0;
-        }
-        .step-text {
-            color: #2d3748;
-            line-height: 1.6;
-        }
-        .spinner {
-            border: 3px solid #f3f3f3;
-            border-top: 3px solid #667eea;
-            border-radius: 50%;
-            width: 40px;
-            height: 40px;
-            animation: spin 1s linear infinite;
-            margin: 20px auto;
-        }
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
-        .loading-text {
-            color: #718096;
-            margin-top: 12px;
-        }
-        #app {
-            display: none;
-            width: 100%;
-            max-width: 1200px;
-            padding: 20px;
-        }
-        .file-list {
-            padding: 20px;
-            margin: 0 auto;
-        }
-        .file-item {
-            background: white;
-            padding: 16px;
-            margin: 8px 0;
-            border-radius: 8px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-        }
-        .upload-zone {
-            border: 2px dashed #667eea;
-            padding: 40px;
-            text-align: center;
-            border-radius: 12px;
-            margin: 20px 0;
-            background: white;
-            cursor: pointer;
-            transition: all 0.2s;
-        }
-        .upload-zone:hover {
-            background: #f8f9ff;
-            border-color: #764ba2;
-        }
-        .upload-zone.drag-over {
-            background: rgba(102, 126, 234, 0.1);
-            border-color: #764ba2;
-        }
-
-        .upload-progress-list {
-            margin-top: 16px;
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-        }
-
-        .upload-progress-item {
-            background: white;
-            border-radius: 8px;
-            padding: 12px;
-            font-size: 13px;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-        }
-
-        .upload-progress-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 8px;
-        }
-
-        .upload-progress-bar {
-            width: 100%;
-            height: 6px;
-            border-radius: 999px;
-            background: #E2E8F0;
-            overflow: hidden;
-        }
-
-        .upload-progress-bar-inner {
-            height: 100%;
-            width: 0%;
-            background: linear-gradient(90deg, #667eea, #764ba2);
-            transition: width 0.15s ease-out;
-        }
-
-        .control-btn {
-            background: none;
-            border: none;
-            cursor: pointer;
-            font-size: 16px;
-            padding: 4px;
-            border-radius: 4px;
-            transition: background 0.2s;
-        }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+        .pairing-card { background: white; border-radius: 20px; padding: 48px; text-align: center; box-shadow: 0 20px 60px rgba(0,0,0,0.3); max-width: 500px; }
+        h1 { font-size: 32px; margin-bottom: 16px; color: #1a202c; }
+        .subtitle { color: #718096; margin-bottom: 32px; font-size: 16px; }
+        #qrcode { display: inline-block; padding: 20px; background: white; border-radius: 12px; margin: 24px 0; }
+        .spinner { border: 3px solid #f3f3f3; border-top: 3px solid #667eea; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 20px auto; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        #app { display: none; width: 100%; max-width: 1200px; padding: 20px; }
+        .file-list { padding: 20px; margin: 0 auto; }
+        .file-item { background: white; padding: 16px; margin: 8px 0; border-radius: 8px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        .upload-zone { border: 2px dashed #667eea; padding: 40px; text-align: center; border-radius: 12px; margin: 20px 0; background: white; cursor: pointer; transition: all 0.2s; }
+        .upload-zone:hover { background: #f8f9ff; border-color: #764ba2; }
+        .upload-progress-item { background: white; border-radius: 8px; padding: 12px; font-size: 13px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 8px; }
+        .upload-progress-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+        .upload-progress-bar { width: 100%; height: 6px; border-radius: 999px; background: #E2E8F0; overflow: hidden; }
+        .upload-progress-bar-inner { height: 100%; width: 0%; background: linear-gradient(90deg, #667eea, #764ba2); transition: width 0.15s ease-out; }
+        .control-btn { background: none; border: none; cursor: pointer; font-size: 16px; padding: 4px; border-radius: 4px; transition: background 0.2s; }
         .control-btn:hover { background: #edf2f7; }
         .cancel-btn { color: #e53e3e; }
         .pause-btn { color: #667eea; }
-
-        #push-notification {
-            position: fixed;
-            bottom: 20px;
-            right: 20px;
-            background: #667eea;
-            color: white;
-            padding: 16px 24px;
-            border-radius: 12px;
-            box-shadow: 0 10px 25px rgba(0,0,0,0.2);
-            display: none;
-            animation: slideUp 0.3s ease-out;
-            z-index: 1000;
-        }
-
-        @keyframes slideUp {
-            from { transform: translateY(100%); opacity: 0; }
-            to { transform: translateY(0); opacity: 1; }
-        }
+        #push-notification { position: fixed; bottom: 20px; right: 20px; background: #667eea; color: white; padding: 16px 24px; border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.2); display: none; z-index: 1000; }
     </style>
 </head>
 <body>
-    <!-- Pairing Screen -->
     <div id="pairing">
         <div class="pairing-card">
             <h1> airBridge</h1>
@@ -203,15 +37,9 @@
             <div id="qrcode"></div>
             <div class="spinner"></div>
             <p class="loading-text">Waiting for phone to scan...</p>
-            <div class="instructions">
-                <div class="step"><div class="step-number">1</div><div class="step-text">Open AirBridge app on your phone</div></div>
-                <div class="step"><div class="step-number">2</div><div class="step-text">Tap "Scan QR Code" button</div></div>
-                <div class="step"><div class="step-number">3</div><div class="step-text">Point camera at QR code above</div></div>
-            </div>
         </div>
     </div>
 
-    <!-- Main App -->
     <div id="app">
         <div class="file-list">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
@@ -227,10 +55,9 @@
         </div>
     </div>
 
-    <div id="push-notification">Receiving file from phone...</div>
+    <div id="push-notification">Receiving file...</div>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
-
     <script>
         const serverUrl = window.location.origin;
         let token = new URLSearchParams(window.location.search).get('token');
@@ -247,7 +74,7 @@
                 const pairingUrl = `airbridge://pair?id=${pairingId}&server=${encodeURIComponent(serverUrl)}`;
                 new QRCode(document.getElementById('qrcode'), { text: pairingUrl, width: 256, height: 256, colorDark: '#1a202c', colorLight: '#ffffff', correctLevel: QRCode.CorrectLevel.H });
                 checkPairingStatus();
-            } catch (error) { document.querySelector('.loading-text').textContent = 'Connection failed. Refresh to try again.'; }
+            } catch (error) { document.querySelector('.loading-text').textContent = 'Connection failed. Refresh.'; }
         }
 
         async function checkPairingStatus() {
@@ -261,8 +88,6 @@
         function showApp() {
             document.getElementById('pairing').style.display = 'none';
             document.getElementById('app').style.display = 'block';
-            document.body.style.background = '#f5f5f5';
-            document.body.style.display = 'block';
             loadFiles();
             startPushPolling();
             startServerSync();
@@ -272,8 +97,7 @@
             try {
                 const response = await fetch(`${serverUrl}/api/files?token=${token}`);
                 const files = await response.json();
-                const container = document.getElementById('filesList');
-                container.innerHTML = files.map(file => `<div class="file-item"><span>${file.icon} ${file.name}</span><a href="${serverUrl}/api/download/${file.id}?token=${token}" download style="text-decoration: none; color: #667eea; font-weight: 600;">⬇️ Download</a></div>`).join('');
+                document.getElementById('filesList').innerHTML = files.map(file => `<div class="file-item"><span>${file.name}</span><a href="${serverUrl}/api/download/${file.id}?token=${token}" download style="text-decoration: none; color: #667eea; font-weight: 600;">⬇️ Download</a></div>`).join('');
             } catch (error) {}
         }
 
@@ -283,16 +107,13 @@
                     const response = await fetch(`${serverUrl}/api/push/status?token=${token}`);
                     const data = await response.json();
                     if (data.pending && data.file) {
-                        const notification = document.getElementById('push-notification');
-                        notification.textContent = `⬇️ Receiving: ${data.file.fileName}`;
-                        notification.style.display = 'block';
                         const link = document.createElement('a');
                         link.href = `${serverUrl}/api/push/next?token=${token}`;
                         link.download = data.file.fileName;
                         document.body.appendChild(link);
                         link.click();
                         document.body.removeChild(link);
-                        setTimeout(() => { notification.style.display = 'none'; loadFiles(); }, 5000);
+                        loadFiles();
                     }
                 } catch (e) {}
             }, 3000);
@@ -301,23 +122,28 @@
         function startServerSync() {
             setInterval(async () => {
                 Object.values(activeUploads).forEach(async (item) => {
-                    if (item.status === 'completed' || item.status === 'cancelled') return;
-                    // 'error' items are kept in the loop — a phone Resume can recover them.
+                    // Skip completed/error/cancelled
+                    if (item.status === 'completed' || item.status === 'error' || item.status === 'cancelled') return;
+                    // Skip while user is manually interacting
+                    if (item.isActionLock) return;
+
                     try {
                         const res = await fetch(`${serverUrl}/api/upload/status?id=${item.id}&filename=${encodeURIComponent(item.name)}&token=${token}`);
                         const data = await res.json();
 
+                        // Phone cancelled -> abort and cleanup
                         if (data.status === 'cancelled') {
                             if (item.xhr) item.xhr.abort();
                             item.cancelled();
-                        } else if (data.isPaused && !item.isPaused && !item.isResuming) {
+                        }
+                        // Phone paused and browser is still uploading -> pause browser
+                        else if (data.isPaused && !item.isPaused) {
                             item.remotePause();
-                        } else if (data.status === 'resuming' && !item.isResuming) {
-                            // Server signals resume — restart from either paused or error state.
-                            if (item.isPaused || item.status === 'error') {
-                                item.isResuming = true;
-                                item.start();
-                            }
+                        }
+                        // Phone resumed (resuming OR uploading status) and browser is paused -> resume browser
+                        else if ((data.status === 'resuming' || data.status === 'uploading') && item.isPaused) {
+                            console.log('[SYNC] Server wants resume, calling start()');
+                            item.start();
                         }
                     } catch(e){}
                 });
@@ -327,9 +153,8 @@
         const uploadZone = document.getElementById('uploadZone');
         const fileInput = document.getElementById('fileInput');
         uploadZone.onclick = () => fileInput.click();
-        uploadZone.ondragover = (e) => { e.preventDefault(); uploadZone.classList.add('drag-over'); };
-        uploadZone.ondragleave = () => uploadZone.classList.remove('drag-over');
-        uploadZone.ondrop = async (e) => { e.preventDefault(); uploadZone.classList.remove('drag-over'); uploadFiles(e.dataTransfer.files); };
+        uploadZone.ondragover = (e) => { e.preventDefault(); };
+        uploadZone.ondrop = async (e) => { e.preventDefault(); uploadFiles(e.dataTransfer.files); };
         fileInput.onchange = (e) => uploadFiles(e.target.files);
 
         function uploadFiles(files) {
@@ -353,32 +178,66 @@
             const cancelBtn = element.querySelector('.cancel-btn');
 
             const item = {
-                id: id, name: name, element, xhr: null, offset: 0, isPaused: false, isResuming: false, status: 'uploading',
+                id: id, name: name, element, xhr: null, offset: 0, isPaused: false, isActionLock: false, status: 'uploading',
                 update: (p) => { bar.style.width = p + '%'; percentText.textContent = Math.round(p) + '%'; },
-                start: async function() {
-                    this.isPaused = false; this.isResuming = false; this.status = 'uploading';
-                    pauseBtn.textContent = '⏸'; pauseBtn.title = 'Pause'; percentText.style.color = 'inherit';
-
-                    let serverStatus = 'none';
-                    try {
-                        const res = await fetch(`${serverUrl}/api/upload/status?id=${this.id}&filename=${encodeURIComponent(name)}&token=${token}`);
-                        const data = await res.json();
-                        this.offset = data.size || 0;
-                        serverStatus = data.status || 'none';
-                        console.log(`[UPLOAD] status check id=${this.id} offset=${this.offset} serverStatus=${serverStatus} fileSize=${fileObject.size}`);
-                    } catch (e) { this.offset = 0; console.warn(`[UPLOAD] status check failed id=${this.id}`, e); }
-
-                    // Auto-complete ONLY when server explicitly confirms completion.
-                    // Any other status (uploading, paused, resuming, interrupted, none) means
-                    // the file is not yet fully written — reset to 0 and re-upload from scratch.
-                    if (this.offset >= fileObject.size) {
-                        if (serverStatus === 'completed') {
-                            console.log(`[UPLOAD] server confirms complete, marking done id=${this.id}`);
-                            this.done(); return;
-                        }
-                        console.log(`[UPLOAD] offset>=size but status=${serverStatus}, resetting to 0 id=${this.id}`);
-                        this.offset = 0;
+                start: async function(skipServerCheck = false) {
+                    // GUARD: Don't start if already uploading with active XHR
+                    if (this.status === 'uploading' && this.xhr) {
+                        console.log(`[UPLOAD] start() called but already uploading with XHR`);
+                        return;
                     }
+                    
+                    this.isActionLock = true;
+                    
+                    let serverOffset = 0;
+                    let serverStatus = 'none';
+                    let serverIsPaused = false;
+                    
+                    // Check server state (unless user manually clicked resume)
+                    if (!skipServerCheck) {
+                        try {
+                            const res = await fetch(`${serverUrl}/api/upload/status?id=${this.id}&filename=${encodeURIComponent(name)}&token=${token}`);
+                            if (!res.ok) throw new Error('Status check failed');
+                            const data = await res.json();
+                            serverOffset = data.size || 0;
+                            serverStatus = data.status;
+                            serverIsPaused = data.isPaused;
+                            console.log(`[UPLOAD] status check: serverOffset=${serverOffset}, serverStatus=${serverStatus}`);
+                        } catch (e) { 
+                            console.warn('[UPLOAD] status check failed, using offset=0');
+                            serverOffset = 0; 
+                        }
+                        
+                        // If server says paused, respect that and don't start
+                        if (serverStatus === 'paused' || serverIsPaused) {
+                            console.log('[UPLOAD] Server is paused, not starting upload');
+                            this.isPaused = true;
+                            this.status = 'paused';
+                            this.isActionLock = false;
+                            pauseBtn.textContent = '▶';
+                            percentText.textContent = 'Paused';
+                            return;
+                        }
+                    } else {
+                        // When manually resuming, just get the offset
+                        try {
+                            const res = await fetch(`${serverUrl}/api/upload/status?id=${this.id}&filename=${encodeURIComponent(name)}&token=${token}`);
+                            const data = await res.json();
+                            serverOffset = data.size || 0;
+                        } catch (e) { 
+                            serverOffset = 0; 
+                        }
+                    }
+                    
+                    // Now safe to set uploading state
+                    this.isPaused = false;
+                    this.status = 'uploading';
+                    pauseBtn.textContent = '⏸';
+                    percentText.style.color = 'inherit';
+
+                    this.offset = serverOffset;
+
+                    if (this.offset >= fileObject.size) { this.isActionLock = false; this.done(); return; }
 
                     const chunk = fileObject.slice(this.offset);
                     const percentBase = (this.offset / fileObject.size) * 100;
@@ -397,26 +256,26 @@
                         };
 
                         this.xhr.onload = () => {
+                            this.isActionLock = false;
                             if (this.xhr.status >= 200 && this.xhr.status < 300) {
                                 try {
                                     const resp = JSON.parse(this.xhr.responseText);
-                                    if (resp.success) {
-                                        this.status = 'completed'; this.done(); resolve();
-                                    } else if (resp.isPaused || resp.status === 'paused') {
-                                        this.remotePause(); resolve();
-                                    } else if (resp.status === 'cancelled') {
-                                        // Phone cancelled — show cancelled, no resume
-                                        this.status = 'cancelled'; this.cancelled(); resolve();
-                                    } else {
-                                        this.status = 'error'; this.error(); reject();
-                                    }
-                                } catch(e) { this.status = 'completed'; this.done(); resolve(); }
+                                    if (resp.success) { this.status = 'completed'; this.done(); resolve(); }
+                                    else if (resp.isPaused) { this.remotePause(); resolve(); }
+                                    else { this.status = 'error'; this.error(); reject(); }
+                                } catch(e) {
+                                    // JSON parse failed - don't assume completed
+                                    // This can happen during fast pause/resume race
+                                    this.status = 'error'; this.error(); reject();
+                                }
                             } else { this.status = 'error'; this.error(); reject(); }
                         };
 
                         this.xhr.onerror = () => {
+                            this.isActionLock = false;
                             if (this.status !== 'paused') {
-                                fetch(`${serverUrl}/api/upload/status?id=${this.id}&filename=${encodeURIComponent(name)}&token=${token}`)
+                                // Double-Check: perform quick poll before showing error
+                                fetch(`${serverUrl}/api/upload/status?id=${id}&filename=${encodeURIComponent(name)}&token=${token}`)
                                 .then(r => r.json()).then(data => {
                                     if (data.isPaused) { this.remotePause(); resolve(); }
                                     else { this.status = 'error'; this.error(); reject(); }
@@ -424,52 +283,91 @@
                             } else resolve();
                         };
 
-                        this.xhr.onabort = () => { if (this.isPaused) resolve(); else { this.status = 'cancelled'; this.cancelled(); reject(); } };
+                        this.xhr.onabort = () => { 
+                            // DON'T clear isActionLock here - let the button handler manage it
+                            // for proper cooldown enforcement
+                            if (this.isPaused) {
+                                // Normal pause - resolve silently
+                                resolve(); 
+                            } else if (this.status === 'cancelled') {
+                                // Already handled by cancel button
+                                reject();
+                            } else {
+                                // Unexpected abort - treat as error
+                                this.status = 'error';
+                                this.error();
+                                reject();
+                            }
+                        };
                         this.xhr.send(chunk);
                     });
                 },
-                done: function() { bar.style.width = '100%'; percentText.textContent = 'Done'; pauseBtn.style.display = 'none'; cancelBtn.style.display = 'none'; setTimeout(() => element.remove(), 3000); loadFiles(); },
-                error: function() {
-                    this.status = 'error'; this.isPaused = false;
-                    percentText.textContent = 'Error'; percentText.style.color = 'red';
-                    pauseBtn.style.display = 'none'; // no resume from error state in browser
+                done: function() { 
+                    bar.style.width = '100%'; 
+                    percentText.textContent = 'Finished'; 
+                    pauseBtn.style.display = 'none'; 
+                    cancelBtn.style.display = 'none'; 
+                    setTimeout(() => element.remove(), 3000); 
+                    loadFiles(); 
                 },
-                cancelled: function() {
-                    if (this.status === 'cancelled') return; // idempotent
-                    this.status = 'cancelled'; this.isPaused = false;
-                    percentText.textContent = 'Cancelled'; percentText.style.color = 'orange';
-                    pauseBtn.style.display = 'none'; cancelBtn.style.display = 'none';
-                    delete activeUploads[this.id];
-                    setTimeout(() => element.remove(), 3000);
-                },
-                remotePause: function() {
-                    if (!this.isPaused) {
-                        this.isPaused = true; this.status = 'paused';
-                        if (this.xhr) this.xhr.abort();
-                        pauseBtn.textContent = '▶'; pauseBtn.title = 'Resume';
-                        percentText.textContent = 'Paused';
-                    }
+                error: function() { percentText.textContent = 'Error'; percentText.style.color = 'red'; pauseBtn.textContent = '▶'; this.isPaused = true; },
+                cancelled: function() { percentText.textContent = 'Cancelled'; percentText.style.color = 'orange'; pauseBtn.style.display = 'none'; cancelBtn.style.display = 'none'; setTimeout(() => element.remove(), 2000); delete activeUploads[this.id]; },
+                remotePause: function() { 
+                    if (!this.isPaused) { 
+                        this.isPaused = true; 
+                        this.status = 'paused'; 
+                        if (this.xhr) {
+                            this.xhr.abort();
+                            this.xhr = null;
+                        }
+                        // Clear action lock so resume can work
+                        this.isActionLock = false;
+                        pauseBtn.textContent = '▶'; 
+                        percentText.textContent = 'Paused'; 
+                    } 
                 }
             };
 
             pauseBtn.onclick = async () => {
                 if (!item.isPaused) {
-                    item.isPaused = true; item.status = 'paused';
-                    if (item.xhr) item.xhr.abort();
-                    pauseBtn.textContent = '▶'; pauseBtn.title = 'Resume'; percentText.textContent = 'Paused';
-                    try { await fetch(`${serverUrl}/api/upload/pause?id=${id}&token=${token}`); } catch(e){}
+                    // PAUSE
+                    item.isPaused = true; 
+                    item.status = 'paused';
+                    if (item.xhr) {
+                        item.xhr.abort();
+                        item.xhr = null;
+                    }
+                    pauseBtn.textContent = '▶'; 
+                    percentText.textContent = 'Paused';
+                    try { 
+                        await fetch(`${serverUrl}/api/upload/pause?id=${id}&token=${token}`); 
+                    } catch(e) {}
                 } else {
-                    item.isResuming = true;
-                    item.start();
+                    // RESUME - skip server check, user explicitly wants to resume
+                    await item.start(true);
                 }
             };
 
             cancelBtn.onclick = async () => {
-                // Mark as cancelled first so onabort doesn't think it's an error
-                item.isPaused = true; // prevents onabort from treating this as an error abort
-                if (item.xhr) item.xhr.abort();
+                if (item.isActionLock) return;
+                item.isActionLock = true;
+                
+                // Set status FIRST, then abort
+                item.status = 'cancelled';
+                item.isPaused = false;
+                if (item.xhr) {
+                    item.xhr.abort();
+                    item.xhr = null;
+                }
                 item.cancelled();
-                try { await fetch(`${serverUrl}/api/upload/cancel?id=${id}&filename=${encodeURIComponent(name)}&token=${token}`); } catch(e){}
+                
+                try { 
+                    await fetch(`${serverUrl}/api/upload/cancel?id=${id}&filename=${encodeURIComponent(name)}&token=${token}`); 
+                } catch(e) {
+                    console.warn('[UPLOAD] Failed to notify server of cancel', e);
+                }
+                
+                setTimeout(() => { item.isActionLock = false; }, 1000);
             };
             return item;
         }

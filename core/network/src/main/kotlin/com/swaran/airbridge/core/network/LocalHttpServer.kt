@@ -18,7 +18,6 @@ class LocalHttpServer @Inject constructor(
 
     companion object {
         private const val TAG = "LocalHttpServer"
-        // 5 minutes - needs to be long enough for large file uploads over WiFi
         private const val SOCKET_READ_TIMEOUT = 300_000
     }
 
@@ -29,29 +28,20 @@ class LocalHttpServer @Inject constructor(
             server = object : NanoHTTPD("0.0.0.0", port) {
                 override fun serve(session: IHTTPSession): Response {
                     if (!securityInterceptor.isLocalNetworkRequest(session)) {
-                        return newFixedLengthResponse(
-                            Response.Status.FORBIDDEN,
-                            MIME_PLAINTEXT,
-                            "LAN access only"
-                        )
+                        return newFixedLengthResponse(Response.Status.FORBIDDEN, MIME_PLAINTEXT, "LAN access only")
                     }
+                    
                     val handler = handlers.find { it.canHandle(session) }
-                        ?: return newFixedLengthResponse(
-                            Response.Status.NOT_FOUND,
-                            MIME_PLAINTEXT,
-                            "Not Found"
-                        )
-                    val response = handler.handle(session)
+                        ?: return newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "Not Found")
+                    
+                    val response = try {
+                        handler.handle(session)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Handler failed: ${e.message}")
+                        newFixedLengthResponse(Response.Status.INTERNAL_ERROR, MIME_PLAINTEXT, "Internal Error")
+                    }
 
-                    // ── Disable NanoHTTPD auto-gzip ──────────────────────────────────────────
-                    // NanoHTTPD 2.3.1 HTTPSession.execute() calls r.setGzipEncoding(true) on
-                    // every 200 OK response when Accept-Encoding contains "gzip". This causes
-                    // the browser to receive gzip-encoded bytes and fail to parse them as JSON.
-                    //
-                    // Fix: Replace the status with a custom IStatus instance so that the check
-                    //   Response.Status.OK.equals(r.getStatus())
-                    // returns false (enum identity check fails for our custom object), so
-                    // setGzipEncoding(true) is never called. All headers/body are preserved.
+                    // Disable auto-gzip for JSON/Streams to prevent browser parsing failures
                     val originalStatus = response.status
                     response.status = object : Response.IStatus {
                         override fun getDescription(): String = originalStatus.description

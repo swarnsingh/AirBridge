@@ -33,6 +33,24 @@ class DashboardViewModel @Inject constructor(
     private val uploadController: UploadController
 ) : MviViewModel<DashboardIntent, DashboardState, DashboardEffect>(DashboardState()) {
 
+    private val actionCooldowns = mutableMapOf<String, Long>()
+    private companion object {
+        const val ACTION_COOLDOWN_MS = 1000L // 1 second between pause/resume
+    }
+
+    private fun isOnCooldown(uploadId: String): Boolean {
+        val lastAction = actionCooldowns[uploadId] ?: 0
+        val now = System.currentTimeMillis()
+        // Clean up old entries (older than 10 seconds)
+        actionCooldowns.entries.removeAll { now - it.value > 10000 }
+        return if (now - lastAction < ACTION_COOLDOWN_MS) {
+            true
+        } else {
+            actionCooldowns[uploadId] = now
+            false
+        }
+    }
+
     init {
         updateState { 
             copy(
@@ -69,10 +87,14 @@ class DashboardViewModel @Inject constructor(
                 pushManager.enqueuePush(intent.fileName, intent.uri)
             }
             is DashboardIntent.PauseUpload -> {
-                uploadController.pauseUpload(intent.uploadId)
+                if (!isOnCooldown(intent.uploadId)) {
+                    uploadController.pauseUpload(intent.uploadId)
+                }
             }
             is DashboardIntent.ResumeUpload -> {
-                uploadController.resumeUpload(intent.uploadId)
+                if (!isOnCooldown(intent.uploadId)) {
+                    uploadController.resumeUpload(intent.uploadId)
+                }
             }
             is DashboardIntent.CancelUpload -> {
                 uploadController.cancelUpload(intent.uploadId)

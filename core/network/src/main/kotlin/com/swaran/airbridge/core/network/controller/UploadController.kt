@@ -1,7 +1,9 @@
 package com.swaran.airbridge.core.network.controller
 
 import android.content.Context
+import android.net.Uri
 import android.os.PowerManager
+import android.provider.MediaStore
 import android.util.Log
 import com.swaran.airbridge.core.common.AirDispatchers
 import com.swaran.airbridge.core.common.Dispatcher
@@ -17,11 +19,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
@@ -51,6 +53,7 @@ class UploadController @Inject constructor(
     val activeUploads: StateFlow<Map<String, UploadProgress>> = _activeUploads
 
     private val uploadJobs = ConcurrentHashMap<String, Job>()
+    private val uploadLocks = ConcurrentHashMap<String, Any>()
     private val scope = CoroutineScope(SupervisorJob() + ioDispatcher)
 
     private val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -92,35 +95,12 @@ class UploadController @Inject constructor(
         scope.launch {
             val memProgress = if (uploadId != null) _activeUploads.value[uploadId] else null
             val diskFile = storageRepository.findFileByName(path, fileName).getOrNull()
-
-            // Ground-truth offset = actual bytes currently on disk, read via fd.statSize.
-            // This is CRITICAL for resume correctness: "wa" mode always appends to the end
-            // of the file, so the offset we report must exactly equal the current file length.
-            // MediaStore's SIZE column is unreliable (often reports 0 for partial files).
-            // Memory (bytesReceived) can be ahead of disk if the write buffer wasn't fully
-            // flushed when the upload was paused.
-            val diskSize: Long = diskFile?.id?.let { uriStr ->
-                try {
-                    context.contentResolver.openFileDescriptor(android.net.Uri.parse(uriStr), "r")
-                        ?.use { pfd -> pfd.statSize }
-                } catch (_: Exception) { null }
-            } ?: 0L
-
-            val actualSize = when {
-                // Active uploads: memory is the ONLY accurate source because:
-                // 1. ParcelFileDescriptor.statSize() returns 0 for partial files being written
-                // 2. MediaStore SIZE column is not updated until write completes
-                // 3. memProgress tracks actual bytes written via onProgress callback
-                memProgress != null -> memProgress.bytesReceived
-                // No active upload but file exists on disk (app restart scenario)
-                diskSize > 0L -> diskSize
-                diskFile != null -> diskFile.size
-                else -> 0L
-            }
+            
+            val actualSize = if (memProgress != null) Math.max(diskFile?.size ?: 0L, memProgress.bytesReceived) else diskFile?.size ?: 0L
             val currentStatus = memProgress?.status ?: if (diskFile != null) TransferStatus.INTERRUPTED.value else "none"
-
+            
             future.complete(jsonResponse(JSONObject().apply {
-                put("exists", diskFile != null)
+                put("exists", diskFile != null || actualSize > 0)
                 put("size", actualSize)
                 put("status", currentStatus)
                 put("isPaused", currentStatus == TransferStatus.PAUSED.value)
@@ -132,24 +112,27 @@ class UploadController @Inject constructor(
 
     private fun handlePause(session: NanoHTTPD.IHTTPSession): NanoHTTPD.Response {
         val uploadId = session.parameters["id"]?.firstOrNull() ?: return errorResponse("Missing upload ID")
-        stopUploadJob(uploadId, TransferStatus.PAUSED.value)
+        Log.d(TAG, "[$uploadId] handlePause() called")
+        
+        val job = uploadJobs[uploadId]
+        job?.cancel()
+        
+        _activeUploads.update { current ->
+            val existing = current[uploadId]
+            if (existing != null) {
+                current + (uploadId to existing.copy(status = TransferStatus.PAUSED.value))
+            } else current
+        }
+        
         return jsonResponse(JSONObject().put("success", true))
     }
 
     private fun handleCancel(session: NanoHTTPD.IHTTPSession): NanoHTTPD.Response {
         val uploadId = session.parameters["id"]?.firstOrNull() ?: return errorResponse("Missing upload ID")
-        val fileName = session.parameters["filename"]?.firstOrNull()
-        val path     = session.parameters["path"]?.firstOrNull() ?: "/"
         
-        stopUploadJob(uploadId, TransferStatus.CANCELLED.value)
+        // Use the same cancel logic as app-side cancelUpload
+        cancelUpload(uploadId)
         
-        scope.launch {
-            if (fileName != null) {
-                storageRepository.findFileByName(path, fileName).onSuccess { it?.let { f -> storageRepository.deleteFile(f.id) } }
-            }
-            delay(2000)
-            _activeUploads.update { it - uploadId }
-        }
         return jsonResponse(JSONObject().put("success", true))
     }
 
@@ -158,6 +141,18 @@ class UploadController @Inject constructor(
         val path       = parameters["path"]?.firstOrNull() ?: "/"
         val fileName   = parameters["filename"]?.firstOrNull() ?: "uploaded_file"
         val uploadId   = parameters["id"]?.firstOrNull() ?: "${System.currentTimeMillis()}"
+
+        val lock = uploadLocks.computeIfAbsent(uploadId) { Any() }
+        synchronized(lock) {
+            if (uploadJobs[uploadId] != null) {
+                Log.w(TAG, "[$uploadId] Rejecting overlapping upload")
+                uploadLocks.remove(uploadId)
+                return jsonResponse(JSONObject().apply {
+                    put("success", false)
+                    put("status", "busy")
+                })
+            }
+        }
 
         val contentRange = session.headers["content-range"]
         val isResuming   = contentRange != null
@@ -176,11 +171,32 @@ class UploadController @Inject constructor(
         }
 
         acquireWakeLock()
-        // Force-set status to UPLOADING — bypasses terminal-status protection in updateProgress.
-        // This is required so that a browser-initiated resume (which arrives as a fresh POST)
-        // correctly overrides the previous "paused" status in _activeUploads and prevents the
-        // server-sync loop from seeing "isPaused=true" and re-pausing the browser mid-upload.
-        forceStartUploading(uploadId, fileName, offset, totalBytes)
+        
+        // Don't allow new upload if current one is paused - browser must wait for resume
+        val existingUpload = _activeUploads.value[uploadId]
+        if (existingUpload?.status == TransferStatus.PAUSED.value) {
+            Log.w(TAG, "[$uploadId] Rejecting upload - currently paused")
+            uploadLocks.remove(uploadId)
+            return jsonResponse(JSONObject().apply {
+                put("success", false)
+                put("status", "paused")
+                put("isPaused", true)
+                put("bytesReceived", existingUpload.bytesReceived)
+            })
+        }
+        
+        _activeUploads.update { it - uploadId }
+        _activeUploads.update { current ->
+            current + (uploadId to UploadProgress(
+                id = uploadId,
+                fileName = fileName,
+                bytesReceived = offset,
+                totalBytes = totalBytes,
+                percentage = if(totalBytes > 0) (offset * 100 / totalBytes).toInt() else 0,
+                status = TransferStatus.UPLOADING.value,
+                timestamp = System.currentTimeMillis()
+            ))
+        }
 
         val future = CompletableFuture<NanoHTTPD.Response>()
 
@@ -194,23 +210,48 @@ class UploadController @Inject constructor(
                     totalBytes  = totalBytes,
                     append      = isResuming,
                     onProgress  = { bytesRead ->
+                        if (uploadJobs[uploadId]?.isCancelled == true) {
+                            throw CancellationException("Upload cancelled")
+                        }
                         updateProgress(uploadId, fileName, offset + bytesRead, totalBytes, TransferStatus.UPLOADING.value)
-                        ensureActive()
                     }
                 )
                 result.fold(
-                    onSuccess = {
-                        // Force-set COMPLETED — bypasses terminal "paused" protection so the
-                        // app UI correctly shows 100% done even if a late pause raced with completion.
-                        forceCompleted(uploadId, totalBytes)
-                        future.complete(jsonResponse(JSONObject().put("success", true)))
-                        scope.launch {
-                            delay(5000)
-                            // Only remove if still "completed" — if the user somehow paused right
-                            // as the upload finished the cleanup timer must not steal the entry.
+                    onSuccess = { fileItem ->
+                        val existing = _activeUploads.value[uploadId]
+                        val bytesReceived = existing?.bytesReceived ?: offset
+                        val currentStatus = existing?.status
+                        
+                        // Allow 1KB tolerance for completion check
+                        val isActuallyComplete = bytesReceived >= totalBytes - 1024
+                        
+                        if (currentStatus == TransferStatus.PAUSED.value || 
+                            currentStatus == TransferStatus.CANCELLED.value ||
+                            !isActuallyComplete) {
+                            val finalStatus = currentStatus ?: TransferStatus.INTERRUPTED.value
+                            future.complete(jsonResponse(JSONObject().apply {
+                                put("success", false)
+                                put("status", finalStatus)
+                                put("isPaused", finalStatus == TransferStatus.PAUSED.value)
+                                put("bytesReceived", bytesReceived)
+                            }))
+                        } else {
                             _activeUploads.update { current ->
-                                val existing = current[uploadId]
-                                if (existing?.status == TransferStatus.COMPLETED.value) current - uploadId else current
+                                current + (uploadId to UploadProgress(
+                                    id = uploadId,
+                                    fileName = fileName,
+                                    bytesReceived = totalBytes,
+                                    totalBytes = totalBytes,
+                                    percentage = 100,
+                                    status = TransferStatus.COMPLETED.value,
+                                    timestamp = System.currentTimeMillis()
+                                ))
+                            }
+                            future.complete(jsonResponse(JSONObject().put("success", true)))
+                            // Keep completed upload visible for 5 seconds
+                            scope.launch {
+                                delay(5000)
+                                _activeUploads.update { it - uploadId }
                             }
                         }
                     },
@@ -219,135 +260,146 @@ class UploadController @Inject constructor(
                         val currentStatus = existing?.status
                         val bytesReceived = existing?.bytesReceived ?: offset
                         
-                        if (currentStatus == TransferStatus.PAUSED.value || 
-                            currentStatus == TransferStatus.CANCELLED.value ||
-                            error is CancellationException) {
-                            
-                            val finalState = currentStatus ?: TransferStatus.INTERRUPTED.value
+                        if (error is CancellationException || 
+                            currentStatus == TransferStatus.PAUSED.value ||
+                            currentStatus == TransferStatus.CANCELLED.value) {
                             future.complete(jsonResponse(JSONObject().apply {
                                 put("success", false)
-                                put("status", finalState)
-                                put("isPaused", finalState == TransferStatus.PAUSED.value)
+                                put("status", currentStatus)
+                                put("isPaused", currentStatus == TransferStatus.PAUSED.value)
+                                put("bytesReceived", bytesReceived)
+                            }))
+                        } else if (error is java.io.IOException || error is java.net.SocketException) {
+                            updateProgress(uploadId, fileName, bytesReceived, totalBytes, TransferStatus.INTERRUPTED.value)
+                            future.complete(jsonResponse(JSONObject().apply {
+                                put("success", false)
+                                put("status", TransferStatus.INTERRUPTED.value)
+                                put("isPaused", false)
                                 put("bytesReceived", bytesReceived)
                             }))
                         } else {
                             updateProgress(uploadId, fileName, bytesReceived, totalBytes, TransferStatus.ERROR.value)
                             future.complete(errorResponse(error.message ?: "Upload failed"))
                             scope.launch {
-                                delay(10000)
-                                _activeUploads.update { current ->
-                                    val existing = current[uploadId]
-                                    if (existing?.status == TransferStatus.ERROR.value) current - uploadId else current
-                                }
+                                delay(3000)
+                                _activeUploads.update { it - uploadId }
                             }
                         }
                     }
                 )
             } catch (e: Exception) {
-                val existing = _activeUploads.value[uploadId]
-                val bytesReceived = existing?.bytesReceived ?: offset
-                
-                if (existing?.status == TransferStatus.PAUSED.value || e is CancellationException) {
-                    future.complete(jsonResponse(JSONObject().apply {
-                        put("success", false)
-                        put("status", TransferStatus.PAUSED.value)
-                        put("isPaused", true)
-                        put("bytesReceived", bytesReceived)
-                    }))
-                } else {
-                    updateProgress(uploadId, fileName, bytesReceived, totalBytes, TransferStatus.INTERRUPTED.value)
-                    future.complete(jsonResponse(JSONObject().apply {
-                        put("success", false)
-                        put("status", "interrupted")
-                        put("bytesReceived", bytesReceived)
-                    }))
-                }
+                val bytesReceived = _activeUploads.value[uploadId]?.bytesReceived ?: offset
+                updateProgress(uploadId, fileName, bytesReceived, totalBytes, TransferStatus.INTERRUPTED.value)
+                future.complete(jsonResponse(JSONObject().apply {
+                    put("success", false)
+                    put("status", "interrupted")
+                    put("bytesReceived", bytesReceived)
+                }))
             } finally {
                 uploadJobs.remove(uploadId)
+                uploadLocks.remove(uploadId)
                 checkAndReleaseWakeLock()
             }
         }
 
         uploadJobs[uploadId] = job
-        // Race guard: if stopUploadJob ran before we stored the job, cancel it now.
-        val storedStatus = _activeUploads.value[uploadId]?.status
-        if (storedStatus == TransferStatus.PAUSED.value || storedStatus == TransferStatus.CANCELLED.value) {
-            job.cancel()
-        }
 
-        return try {
-            future.get()
-        } catch (e: Exception) {
-            errorResponse(e.message ?: "Upload failed")
-        }
+        return try { future.get() } catch (e: Exception) { errorResponse(e.message ?: "Upload failed") }
     }
 
     fun pauseUpload(uploadId: String) {
-        stopUploadJob(uploadId, TransferStatus.PAUSED.value)
+        Log.d(TAG, "[$uploadId] pauseUpload() called")
+        val job = uploadJobs[uploadId]
+        job?.cancel()
+        _activeUploads.update { current ->
+            val existing = current[uploadId]
+            if (existing != null) {
+                current + (uploadId to existing.copy(status = TransferStatus.PAUSED.value))
+            } else current
+        }
     }
 
     fun resumeUpload(uploadId: String) {
+        val existing = _activeUploads.value[uploadId]
+        if (existing == null) return
+        if (existing.status !in listOf(TransferStatus.PAUSED.value, TransferStatus.INTERRUPTED.value)) return
+        
         _activeUploads.update { current ->
-            val existing = current[uploadId]
-            // Never resume a completed upload — it would flip to "resuming", trigger the
-            // browser to call start(), which then auto-completes based on the full disk size.
-            if (existing == null || existing.status == TransferStatus.COMPLETED.value) return@update current
             current + (uploadId to existing.copy(status = TransferStatus.RESUMING.value))
         }
     }
 
     fun cancelUpload(uploadId: String) {
         val progress = _activeUploads.value[uploadId]
-        stopUploadJob(uploadId, TransferStatus.CANCELLED.value)
-        scope.launch {
-            if (progress != null) {
-                storageRepository.findFileByName("/", progress.fileName).onSuccess { it?.let { f -> storageRepository.deleteFile(f.id) } }
-            }
-            delay(2000)
-            _activeUploads.update { it - uploadId }
-        }
-    }
-
-    private fun stopUploadJob(uploadId: String, newStatus: String) {
+        val job = uploadJobs[uploadId]
+        
+        job?.cancel()
         _activeUploads.update { current ->
             val existing = current[uploadId]
             if (existing != null) {
-                current + (uploadId to existing.copy(status = newStatus))
+                current + (uploadId to existing.copy(status = TransferStatus.CANCELLED.value))
             } else current
         }
-        uploadJobs[uploadId]?.cancel()
-    }
-
-    /**
-     * Directly sets the progress entry to UPLOADING, overriding any terminal status
-     * (including "paused").  Only call this when a real HTTP upload connection has
-     * just been accepted — not from the ongoing onProgress callback.
-     */
-    private fun forceStartUploading(uploadId: String, fileName: String, bytesReceived: Long, totalBytes: Long) {
-        val pct = if (totalBytes > 0) ((bytesReceived * 100) / totalBytes).toInt() else 0
-        _activeUploads.update { current ->
-            val existing = current[uploadId]
-            current + (uploadId to UploadProgress(
-                id            = uploadId,
-                fileName      = fileName,
-                bytesReceived = bytesReceived,
-                totalBytes    = totalBytes,
-                percentage    = pct,
-                status        = TransferStatus.UPLOADING.value,
-                timestamp     = existing?.timestamp ?: System.currentTimeMillis()
-            ))
+        
+        scope.launch {
+            try { withTimeout(5000) { job?.join() } } catch (e: Exception) {}
+            uploadJobs.remove(uploadId)
+            
+            if (progress != null) {
+                deleteFileForCancel(progress.fileName)
+            }
+            _activeUploads.update { it - uploadId }
         }
     }
-
-    private fun forceCompleted(uploadId: String, totalBytes: Long) {
-        _activeUploads.update { current ->
-            val existing = current[uploadId] ?: return@update current
-            current + (uploadId to existing.copy(
-                status        = TransferStatus.COMPLETED.value,
-                bytesReceived = totalBytes,
-                totalBytes    = totalBytes,
-                percentage    = 100
-            ))
+    
+    private suspend fun deleteFileForCancel(fileName: String) {
+        Log.d(TAG, "Deleting file: $fileName")
+        try {
+            // Try to find by name directly in MediaStore (most reliable)
+            val contentResolver = context.contentResolver
+            val projection = arrayOf(MediaStore.Files.FileColumns._ID)
+            val selection = "${MediaStore.Files.FileColumns.DISPLAY_NAME} = ?"
+            val selectionArgs = arrayOf(fileName)
+            
+            contentResolver.query(
+                MediaStore.Files.getContentUri("external"),
+                projection, selection, selectionArgs, null
+            )?.use { cursor ->
+                while (cursor.moveToNext()) {
+                    val id = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns._ID))
+                    val uri = Uri.parse("content://media/external/file/$id")
+                    try {
+                        val deleted = contentResolver.delete(uri, null, null)
+                        if (deleted > 0) {
+                            Log.d(TAG, "Deleted file via MediaStore: $uri")
+                            return@deleteFileForCancel
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "MediaStore delete failed for $uri", e)
+                    }
+                }
+            }
+            
+            // Fallback: try repository paths (path "/" gives correct base path)
+            val paths = listOf("/", "Download")
+            for (path in paths) {
+                val result = storageRepository.findFileByName(path, fileName)
+                result.onSuccess { file ->
+                    file?.id?.let { fileId ->
+                        try {
+                            storageRepository.deleteFile(fileId)
+                            Log.d(TAG, "Deleted file via repository: $fileId")
+                            return@deleteFileForCancel
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Repository delete failed for $fileId", e)
+                        }
+                    }
+                }
+            }
+            
+            Log.w(TAG, "Could not find/delete file: $fileName")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error during file deletion", e)
         }
     }
 
@@ -355,12 +407,8 @@ class UploadController @Inject constructor(
         val pct = if (totalBytes > 0) ((bytesReceived * 100) / totalBytes).toInt() else 0
         _activeUploads.update { current ->
             val existing = current[uploadId]
-            val finalStatus = when (existing?.status) {
-                TransferStatus.PAUSED.value, 
-                TransferStatus.CANCELLED.value, 
-                TransferStatus.COMPLETED.value, 
-                TransferStatus.ERROR.value -> existing.status
-                else -> status
+            if (existing?.status in listOf(TransferStatus.PAUSED.value, TransferStatus.CANCELLED.value, TransferStatus.COMPLETED.value, TransferStatus.ERROR.value)) {
+                return@update current
             }
             current + (uploadId to UploadProgress(
                 id            = uploadId,
@@ -368,15 +416,18 @@ class UploadController @Inject constructor(
                 bytesReceived = bytesReceived,
                 totalBytes    = totalBytes,
                 percentage    = pct,
-                status        = finalStatus,
+                status        = status,
                 timestamp     = existing?.timestamp ?: System.currentTimeMillis()
             ))
         }
     }
 
     @Synchronized private fun acquireWakeLock() {
-        if (wakeLock == null) {
-            wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKE_LOCK_TAG).apply { acquire(30 * 60 * 1000L) }
+        if (wakeLock == null || !wakeLock!!.isHeld) {
+            wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKE_LOCK_TAG).apply { 
+                setReferenceCounted(false)
+                acquire(30 * 60 * 1000L) 
+            }
         }
     }
 

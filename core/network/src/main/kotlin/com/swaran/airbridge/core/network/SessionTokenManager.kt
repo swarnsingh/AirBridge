@@ -4,26 +4,35 @@ import com.swaran.airbridge.domain.model.SessionInfo
 import com.swaran.airbridge.domain.repository.SessionRepository
 import java.security.SecureRandom
 import java.util.Base64
+import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
 
+/**
+ * SessionTokenManager handles secure token generation and lifecycle management.
+ * 
+ * Implements P3 Security Recommendations:
+ * - Uses SecureRandom for unguessable tokens.
+ * - Implements TTL (Time-To-Live) for session expiration.
+ * - Provides centralized validation for all network endpoints.
+ */
 @Singleton
 class SessionTokenManager @Inject constructor(
     private val ipAddressProvider: IpAddressProvider
 ) : SessionRepository {
 
-    private val sessions = mutableMapOf<String, SessionInfo>()
+    private val sessions = ConcurrentHashMap<String, SessionInfo>()
     private val random = SecureRandom()
 
     companion object {
-        private const val SESSION_DURATION_MS = 30 * 60 * 1000L // 30 minutes
-        private const val TOKEN_LENGTH = 8 // 8 bytes = ~11 chars in Base64
+        private const val SESSION_DURATION_MS = 30 * 60 * 1000L // 30 minute TTL
+        private const val TOKEN_BYTES = 16 // Higher entropy
     }
 
     override suspend fun generateSession(): SessionInfo {
         cleanupExpiredSessions()
 
-        val token = generateToken()
+        val token = generateSecureToken()
         val serverAddress = ipAddressProvider.getLocalIpAddress() ?: "localhost"
         val session = SessionInfo(
             token = token,
@@ -37,7 +46,11 @@ class SessionTokenManager @Inject constructor(
 
     override fun validateSession(token: String): Boolean {
         val session = sessions[token] ?: return false
-        return !session.isExpired()
+        if (session.isExpired()) {
+            sessions.remove(token)
+            return false
+        }
+        return true
     }
 
     override suspend fun invalidateSession(token: String) {
@@ -45,16 +58,22 @@ class SessionTokenManager @Inject constructor(
     }
 
     override suspend fun getSession(token: String): SessionInfo? {
-        return sessions[token]?.takeIf { !it.isExpired() }
+        val session = sessions[token]
+        return if (session != null && !session.isExpired()) {
+            session
+        } else {
+            if (session != null) sessions.remove(token)
+            null
+        }
     }
 
     override suspend fun cleanupExpiredSessions() {
         val now = System.currentTimeMillis()
-        sessions.entries.removeAll { it.value.expiryTime < now }
+        sessions.entries.removeIf { it.value.expiryTime < now }
     }
 
-    private fun generateToken(): String {
-        val bytes = ByteArray(TOKEN_LENGTH)
+    private fun generateSecureToken(): String {
+        val bytes = ByteArray(TOKEN_BYTES)
         random.nextBytes(bytes)
         return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
     }
