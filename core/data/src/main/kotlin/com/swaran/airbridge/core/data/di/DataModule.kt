@@ -1,5 +1,8 @@
 package com.swaran.airbridge.core.data.di
 
+import com.swaran.airbridge.core.common.logging.AirLogger
+import com.swaran.airbridge.core.data.logging.TimberAirLogger
+import com.swaran.airbridge.core.data.persistence.FileUploadStatePersistence
 import com.swaran.airbridge.core.network.SessionTokenManager
 import com.swaran.airbridge.core.service.ServerRepositoryImpl
 import com.swaran.airbridge.core.storage.repository.FileRepository
@@ -7,6 +10,7 @@ import com.swaran.airbridge.domain.repository.ServerRepository
 import com.swaran.airbridge.domain.repository.SessionRepository
 import com.swaran.airbridge.domain.repository.StorageAccessManager
 import com.swaran.airbridge.domain.repository.StorageRepository
+import com.swaran.airbridge.domain.repository.UploadStatePersistence
 import dagger.Binds
 import dagger.Module
 import dagger.hilt.InstallIn
@@ -40,4 +44,16 @@ abstract class DataModule {
     abstract fun bindSessionRepository(
         impl: SessionTokenManager
     ): SessionRepository
+
+    @Binds
+    @Singleton
+    abstract fun bindUploadStatePersistence(
+        impl: FileUploadStatePersistence
+    ): UploadStatePersistence
+
+    @Binds
+    @Singleton
+    abstract fun bindAirLogger(
+        impl: TimberAirLogger
+    ): AirLogger
 }

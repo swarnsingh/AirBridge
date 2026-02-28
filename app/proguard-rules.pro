@@ -10,9 +10,6 @@
     @dagger.hilt.android.lifecycle.HiltViewModel <init>(...);
 }
 
-# Keep NanoHTTPD
--keep class fi.iki.elonen.** { *; }
-
 # Keep Gson serialized names
 -keepclassmembers class * {
     @com.google.gson.annotations.SerializedName <fields>;

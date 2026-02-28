@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.provider.MediaStore
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
@@ -68,6 +69,8 @@ fun DashboardRoute(
             is DashboardEffect.NavigateToPermissions -> onNavigateToPermissions()
             is DashboardEffect.NavigateToFileBrowser -> onNavigateToFileBrowser()
             is DashboardEffect.LaunchStorageDirectoryPicker -> directoryPicker.launch(null)
+            is DashboardEffect.ShowError -> Toast.makeText(context, e.message, Toast.LENGTH_LONG).show()
+            is DashboardEffect.ShowInfo -> Toast.makeText(context, e.message, Toast.LENGTH_SHORT).show()
             else -> {}
         }
     }

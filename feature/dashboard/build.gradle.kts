@@ -33,10 +33,12 @@ dependencies {
     implementation(project(":core:common"))
     implementation(project(":core:mvi"))
     implementation(project(":core:network"))
+    implementation(project(":core:service"))
     implementation(project(":domain"))
     implementation(project(":core:data"))
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.collections.immutable)
+    implementation(libs.timber)
 
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)

@@ -9,12 +9,23 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
-import android.util.Log
+import com.swaran.airbridge.core.common.logging.AirLogger
 import androidx.core.app.NotificationCompat
-import com.swaran.airbridge.core.network.HttpControllers
-import com.swaran.airbridge.core.network.LocalHttpServer
+import com.swaran.airbridge.core.common.AirDispatchers
+import com.swaran.airbridge.core.common.Dispatcher
 import com.swaran.airbridge.core.network.SessionTokenManager
+import com.swaran.airbridge.core.network.ktor.KtorLocalServer
+import com.swaran.airbridge.core.network.upload.UploadScheduler
+import com.swaran.airbridge.core.service.notification.UploadNotificationManager
+import com.swaran.airbridge.core.service.network.NetworkMonitor
+import com.swaran.airbridge.core.service.thermal.ThermalMonitor
+import com.swaran.airbridge.core.service.doze.DozeModeMonitor
+import com.swaran.airbridge.domain.model.UploadMetadata
+import com.swaran.airbridge.domain.model.UploadState
+import com.swaran.airbridge.domain.repository.UploadStatePersistence
+import com.swaran.airbridge.domain.usecase.UploadStateManager
 import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -22,23 +33,62 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
+/**
+ * Foreground service managing the AirBridge HTTP server.
+ *
+ * ## Architecture
+ *
+ * This service runs the Ktor CIO server for LAN file transfers.
+ * It maintains a foreground notification to keep the service alive
+ * and displays upload progress with pause/resume/cancel actions.
+ *
+ * ## Features
+ *
+ * - HTTP server on port 8081
+ * - Upload progress notification with actions
+ * - Thermal throttling detection and auto-pause
+ * - Crash recovery via persisted upload state
+ */
 @AndroidEntryPoint
 class ForegroundServerService : Service() {
 
     @Inject
-    lateinit var localHttpServer: LocalHttpServer
+    lateinit var ktorLocalServer: KtorLocalServer
+    @Inject
+    lateinit var serverPreferences: ServerPreferences
     @Inject
     lateinit var sessionTokenManager: SessionTokenManager
     @Inject
-    lateinit var controllers: HttpControllers
+    lateinit var uploadScheduler: UploadScheduler
+    @Inject
+    lateinit var uploadStateManager: UploadStateManager
+    @Inject
+    lateinit var notificationManager: UploadNotificationManager
+    @Inject
+    lateinit var thermalMonitor: ThermalMonitor
+    @Inject
+    lateinit var networkMonitor: NetworkMonitor
+    @Inject
+    lateinit var dozeModeMonitor: DozeModeMonitor
+    @Inject
+    lateinit var uploadStatePersistence: UploadStatePersistence
+    @Inject
+    lateinit var logger: AirLogger
 
-    private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    @Inject
+    @Dispatcher(AirDispatchers.IO)
+    lateinit var ioDispatcher: CoroutineDispatcher
+
+    private val serviceScope by lazy { CoroutineScope(ioDispatcher + SupervisorJob()) }
 
     companion object {
         private const val TAG = "ForegroundServerService"
+        private const val DEFAULT_PORT = 8081
         const val CHANNEL_ID = "airbridge_server_channel"
         const val NOTIFICATION_ID = 1
         const val ACTION_START = "com.swaran.airbridge.action.START"
@@ -51,6 +101,12 @@ class ForegroundServerService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        thermalMonitor.startMonitoring()
+        networkMonitor.startMonitoring()
+        dozeModeMonitor.startMonitoring()
+        
+        // Recover interrupted uploads from previous session
+        recoverInterruptedUploads()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -66,20 +122,91 @@ class ForegroundServerService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         serviceScope.cancel()
-        localHttpServer.stop()
+        thermalMonitor.stopMonitoring()
+        networkMonitor.stopMonitoring()
+        dozeModeMonitor.stopMonitoring()
+        ktorLocalServer.stop()
         _isRunning.value = false
+    }
+
+    /**
+     * Recovers uploads that were interrupted by app termination.
+     */
+    private fun recoverInterruptedUploads() {
+        serviceScope.launch {
+            try {
+                // Load persisted uploads that can be recovered
+                val recoverableUploads = uploadStatePersistence.loadAll()
+                    .filter { it.canRecover() }
+                
+                if (recoverableUploads.isEmpty()) {
+                    logger.d(TAG, "log", "No uploads to recover")
+                    return@launch
+                }
+                
+                logger.i(TAG, "log", "Recovering ${recoverableUploads.size} interrupted uploads")
+                
+                recoverableUploads.forEach { persisted ->
+                    val uploadId = persisted.uploadId
+                    
+                    // Initialize upload in state manager
+                    val metadata = UploadMetadata(
+                        uploadId = uploadId,
+                        fileUri = persisted.fileUri,
+                        displayName = persisted.displayName,
+                        path = persisted.path,
+                        totalBytes = persisted.totalBytes
+                    )
+                    
+                    uploadStateManager.initialize(metadata)
+                    
+                    // Restore bytes received
+                    uploadStateManager.updateProgress(uploadId, persisted.bytesReceived)
+                    
+                    // Determine recovery state
+                    val recoveredState = persisted.recoveryState()
+                    
+                    uploadStateManager.transition(
+                        uploadId = uploadId,
+                        newState = recoveredState,
+                        errorMessage = if (recoveredState == UploadState.ERROR_RETRYABLE) {
+                            "Upload interrupted by app termination"
+                        } else null
+                    )
+                    
+                    logger.d(TAG, "log", "[$uploadId] Recovered to $recoveredState (${persisted.bytesReceived} bytes)")
+                }
+                
+                // Persist the recovery states
+                uploadStateManager.activeUploads.value.values
+                    .filter { !it.isTerminal }
+                    .forEach { status ->
+                        uploadStatePersistence.persist(status)
+                    }
+                    
+            } catch (e: Exception) {
+                logger.e(TAG, "log", "Failed to recover interrupted uploads", e)
+            }
+        }
     }
 
     private fun startServer() {
         serviceScope.launch {
             val session = sessionTokenManager.generateSession()
-            val success = localHttpServer.start(session.serverPort)
+            val port = serverPreferences.getLastPort()
+
+            logger.i(TAG, "log", "Starting Ktor server on port $port")
+            val success = ktorLocalServer.start(port)
 
             if (success) {
                 _isRunning.value = true
+                serverPreferences.saveLastPort(port)
+
+                observeUploadsAndUpdateNotification(port, session.serverAddress)
+
                 val notification = buildNotification(
                     "AirBridge is Active",
-                    "Sharing at ${session.serverAddress}:${session.serverPort}"
+                    "Sharing at ${session.serverAddress}:$port"
                 )
 
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
@@ -92,14 +219,14 @@ class ForegroundServerService : Service() {
                     startForeground(NOTIFICATION_ID, notification)
                 }
             } else {
-                Log.e(TAG, "Failed to start local HTTP server")
+                logger.e(TAG, "log", "Failed to start Ktor server on port $port")
                 stopSelf()
             }
         }
     }
 
     private fun stopServer() {
-        localHttpServer.stop()
+        ktorLocalServer.stop()
         _isRunning.value = false
         stopSelf()
     }
@@ -134,5 +261,31 @@ class ForegroundServerService : Service() {
                 stopPendingIntent
             )
             .build()
+    }
+
+    private fun observeUploadsAndUpdateNotification(port: Int, serverAddress: String) {
+        serviceScope.launch {
+            combine(
+                uploadStateManager.activeUploads,
+                uploadStateManager.isGlobalPaused
+            ) { uploads, isPaused ->
+                val activeUploads = uploads.values.filter { !it.isTerminal }
+                val stats = uploadStateManager.getAggregatedStats()
+                Triple(activeUploads, isPaused, stats)
+            }.collectLatest { (activeUploads, isPaused, stats) ->
+                val notification = if (activeUploads.isNotEmpty()) {
+                    notificationManager.buildUploadNotification(
+                        activeUploads = activeUploads,
+                        isGlobalPaused = isPaused,
+                        aggregatedStats = stats
+                    )
+                } else {
+                    notificationManager.buildIdleNotification(serverAddress, port)
+                }
+
+                val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+                nm.notify(UploadNotificationManager.UPLOAD_NOTIFICATION_ID, notification)
+            }
+        }
     }
 }

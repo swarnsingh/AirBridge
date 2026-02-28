@@ -3,7 +3,7 @@ package com.swaran.airbridge.feature.dashboard.mvi
 import com.swaran.airbridge.core.mvi.MviState
 import com.swaran.airbridge.domain.model.ServerStatus
 import android.net.Uri
-import com.swaran.airbridge.core.network.controller.UploadProgress
+import com.swaran.airbridge.feature.dashboard.viewmodel.UploadProgress
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.persistentListOf
 

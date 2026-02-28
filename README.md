@@ -36,16 +36,16 @@ Architecture
 │  │                      AIRBRIDGE APP                                 │   │
 │  │                                                                   │   │
 │  │  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐       │   │
-│  │  │  Jetpack     │    │   NanoHTTPD  │    │  Foreground  │       │   │
+│  │  │  Jetpack     │    │   Ktor CIO   │    │  Foreground  │       │   │
 │  │  │  Compose UI  │◄──►│   Server     │◄──►│   Service    │       │   │
-│  │  │              │    │   (Port 8080)│    │  + WakeLock  │       │   │
+│  │  │              │    │   (Port 8081)│    │  + WakeLock  │       │   │
 │  │  └──────────────┘    └──────┬───────┘    └──────────────┘       │   │
 │  │         ▲                   │                                    │   │
 │  │         │                   │ HTTP Requests                    │   │
 │  │         │                   ▼                                    │   │
 │  │  ┌──────┴──────┐    ┌──────────────┐                            │   │
 │  │  │  Upload     │◄──►│   Browser    │                            │   │
-│  │  │  Controller │    │   (Any WiFi) │                            │   │
+│  │  │  Scheduler  │    │   (Any WiFi) │                            │   │
 │  │  └─────────────┘    └──────────────┘                            │   │
 │  │         │                                                        │   │
 │  │         │                                                        │   │
@@ -107,22 +107,22 @@ AirBridge follows **Clean Architecture** principles with a highly modularized st
 │                          DATA LAYER                            │
 │                                                                │
 │  ┌─────────────────────────────────────────────────────────┐   │
-│  │                      core:network                         │   │
+│  │                      core:network                       │   │
 │  │                                                         │   │
 │  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │   │
-│  │  │LocalHttpServer│  │UploadController│  │FileController│  │   │
+│  │  │KtorLocalServer│  │UploadScheduler│  │ UploadRoutes │  │   │
 │  │  │              │  │              │  │              │  │   │
-│  │  │ • NanoHTTPD  │  │ • State      │  │ • List files │  │   │
-│  │  │ • Routing    │  │   machine    │  │ • Download   │  │   │
+│  │  │ • Ktor CIO   │  │ • State      │  │ • HTTP API   │  │   │
+│  │  │ • Routing    │  │   machine    │  │ • Auth       │  │   │
 │  │  │ • Security   │  │ • Pause/Resume│  │              │  │   │
 │  │  └──────────────┘  └──────────────┘  └──────────────┘  │   │
 │  └─────────────────────────────────────────────────────────┘   │
 │                                                                │
 │  ┌─────────────────────────────────────────────────────────┐   │
-│  │                      core:storage                       │   │
+│  │                      core:storage                     │   │
 │  │                                                         │   │
 │  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │   │
-│  │  │ FileRepository│  │MediaStoreData │  │SafDataSource │  │   │
+│  │  │ FileRepository│  │MediaStoreData│  │SafDataSource │  │   │
 │  │  │              │  │   Source     │  │              │  │   │
 │  │  │ • Dual mode  │  │ • Query API  │  │ • DocumentFile│  │   │
 │  │  │ • Resume     │  │ • Insert     │  │ • Tree nav   │  │   │
@@ -148,110 +148,67 @@ AirBridge follows **Clean Architecture** principles with a highly modularized st
 │  │  MediaStore  │  │   SAF        │  │     Browser        │ │
 │  │  (Android)   │  │ (Android)    │  │   (Any Device)      │ │
 │  │              │  │              │  │                     │ │
-│  │ • Downloads/ │  │ • User picks │  │ • Web UI served     │ │
-│  │   AirBridge  │  │   any folder │  │   from assets       │ │
-│  │ • Automatic  │  │ • Persistent │  │ • XMLHttpRequest    │ │
-│  │   indexing   │  │   permissions│  │   uploads           │ │
 │  └──────────────┘  └──────────────┘  └──────────────────────┘ │
 └────────────────────────────────────────────────────────────────┘
 ```
 
 ### Upload State Machine
 
-The upload system implements a robust state machine that handles bidirectional control:
-
 ```
-                    ┌─────────────┐
-                    │    IDLE     │
-                    │  (no entry) │
-                    └──────┬──────┘
-                           │ POST /api/upload
-                           ▼
-              ┌────────────────────────┐
-     ┌───────►│       UPLOADING        │◄────────────────────────┐
-     │        │  • Receiving bytes     │                         │
-     │        │  • Progress updates    │                         │
-     │        └──────────┬─────────────┘                         │
-     │                   │                                         │
-     │    ┌──────────────┼──────────────┐                        │
-     │    │              │              │                        │
-     │    ▼              ▼              ▼                        │
-     │ ┌──────┐    ┌─────────┐   ┌──────────┐                  │
-     │ │ PAUSED│    │CANCELLED│   │COMPLETED │                  │
-     │ │       │    │         │   │          │                  │
-     │ │Resume │    │Delete   │   │Show      │                  │
-     │ │works  │    │partial  │   │"Finished"│                  │
-     │ └───┬───┘    └────┬────┘   └────┬─────┘                  │
-     │     │             │             │                         │
-     │     │ resume()    │             │                         │
-     │     ▼             │             │                         │
-     │ ┌────────┐        │             │                         │
-     └─┤RESUMING│        │             │                         │
-       │        │        │             │                         │
-       │Browser │        │             │                         │
-       │restarts│        │             │                         │
-       │upload  │        │             │                         │
-       └────┬───┘        │             │                         │
-            └─────────────┴─────────────┴─────────────────────────┘
-
-State Transitions:
-• UPLOADING → PAUSED     : User clicks pause (either side)
-• PAUSED    → RESUMING   : User clicks resume (phone side)
-• RESUMING  → UPLOADING  : Browser detects resuming, starts upload
-• UPLOADING → CANCELLED  : User clicks cancel
-• UPLOADING → COMPLETED  : All bytes received
-• (any)     → INTERRUPTED: Network error (resumable)
+                    ┌─────────┐
+         ┌─────────►│  QUEUED │────────┐
+         │          └────┬────┘        │
+         │               │             │
+         │               ▼             │
+    ┌────┴────┐    ┌──────────┐    ┌───┴────┐
+    │ CANCELLED│◄───│ UPLOADING│───►│ PAUSED │
+    └─────────┘    └────┬─────┘    └────────┘
+         ▲              │
+         │              ▼
+         │         ┌──────────┐
+         └─────────│ COMPLETED│
+                   └──────────┘
 ```
 
-### Bidirectional Sync Flow
+### Pause/Resume Architecture
 
-Both the Android app and browser can control uploads. Here's how they stay synchronized:
+The system supports bidirectional pause/resume control from both the phone and browser.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                    BROWSER PAUSE → PHONE UPDATES                        │
+│                    BROWSER PAUSE → PHONE CONTROLS                       │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                          │
-│  Browser                              Server              Phone UI      │
-│     │                                    │                   │          │
-│     │  POST /api/upload/pause            │                   │          │
-│     │───────────────────────────────────►│                   │          │
-│     │                                    │ set PAUSED status │          │
-│     │                                    │──────────────────►│          │
-│     │                                    │                   │          │
-│     │                                    │    StateFlow      │          │
-│     │                                    │    emits update   │          │
-│     │                                    │──────────────────►│          │
-│     │                                    │                   ▼          │
-│     │                                    │            ┌─────────────┐    │
-│     │                                    │            │ Shows       │    │
-│     │                                    │            │ "Paused" +  │    │
-│     │                                    │            │ Resume btn  │    │
-│     │                                    │            └─────────────┘    │
-│                                                                          │
+│  Browser           Server              Phone UI                          │
+│     │                │                     │                              │
+│     │ POST /cancel   │                     │                              │
+│     │───────────────►│                     │                              │
+│     │                │ set CANCELLED       │                              │
+│     │                │                    │                              │
+│     │                │────────────────────►│ update UI                    │
+│     │                │                    │                              │
 └─────────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                    PHONE PAUSE → BROWSER UPDATES                        │
+│                    PHONE PAUSE → BROWSER RETRIES                        │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                                                                          │
-│  Phone UI                             Server              Browser         │
-│     │                                    │                   │           │
-│     │  User taps Pause                   │                   │           │
-│     │───────────────────────────────────►│                   │           │
-│     │                                    │ set PAUSED status │           │
-│     │                                    │                   │           │
-│     │                                    │◄──────────────────│           │
-│     │                                    │   GET /status     │           │
-│     │                                    │   (every 2s)      │           │
-│     │                                    │                   │           │
-│     │                                    │ returns isPaused=true          │
-│     │                                    │───────────────────►│          │
-│     │                                    │                   ▼          │
-│     │                                    │            ┌─────────────┐     │
-│     │                                    │            │ remotePause()│    │
-│     │                                    │            │ updates UI   │    │
-│     │                                    │            └─────────────┘     │
+│  Phone UI          Server              Browser                           │
+│     │                │                     │                              │
+│     │ pauseUpload()  │                     │                              │
+│     │───────────────►│                     │                              │
+│     │                │ set PAUSED          │                              │
+│     │                │                    │                              │
+│     │                │◄───────────────────│ GET /status                  │
+│     │                │                    │ (every 2s)                   │
+│     │                │ returns status=    │                              │
+│     │                │  "paused"           │                              │
+│     │                │────────────────────►│                              │
+│     │                │                    │                              │
+│     │                │                    ▼                              │
+│     │                │             ┌─────────────┐                        │
+│     │                │             │ showPauseUI│                        │
+│     │                │             └─────────────┘                        │
 │                                                                          │
 └─────────────────────────────────────────────────────────────────────────┘
 
@@ -283,68 +240,74 @@ Both the Android app and browser can control uploads. Here's how they stay synch
 
 ### Key Design Decisions
 
-#### 1. Why NanoHTTPD + CompletableFuture?
+#### 1. Why Ktor + Coroutines?
 
 ```
-Problem:  NanoHTTPD runs on a thread pool and expects blocking responses
-Solution: CompletableFuture.get() blocks HTTP thread while coroutine does work
+Problem:  HTTP servers need to handle concurrent connections efficiently
+Solution: Ktor with coroutines provides non-blocking I/O and structured concurrency
 
 ┌──────────┐         ┌──────────────────┐         ┌──────────────┐
-│  Browser │────────►│ NanoHTTPD Thread │────────►│  Coroutine   │
+│  Browser │────────►│   Ktor Server    │────────►│  Coroutine   │
 │  Request │         │                  │         │  (IO thread) │
 └──────────┘         └──────────────────┘         └──────────────┘
                             │                            │
-                            │  future.get()              │ actual work
-                            │  (blocks thread)           │ (non-blocking)
+                            │  suspend function          │ actual work
+                            │  (non-blocking)            │ (non-blocking)
                             │                            │
                             ▼                            ▼
                      ┌──────────────┐              ┌──────────────┐
-                     │ Waits for    │              │ Uploads file │
-                     │ coroutine    │              │ with progress│
+                     │ Handles other│              │ Uploads file │
+                     │ requests while│              │ with progress│
+                     │ waiting for I/O│              │              │
                      └──────────────┘              └──────────────┘
 ```
 
-#### 2. Why uploadLocks?
+#### 2. Why File-Level Locking?
 
-Prevents overlapping uploads when user clicks pause/resume rapidly:
+Prevents concurrent writes to the same file from different uploads:
 
 ```kotlin
-// Without locks:
-Thread 1: Check uploadJobs["id"] → null
-Thread 2: Check uploadJobs["id"] → null  ← Both see null!
-Thread 1: Store job
-Thread 2: Store job  ← Overwritten! First upload orphaned.
+// Without file-level locks:
+Upload A: Check file.lock → not locked
+Upload B: Check file.lock → not locked  ← Both see unlocked!
+Upload A: Acquire lock, start writing
+Upload B: Acquire lock, start writing  ← Data corruption!
 
-// With synchronized(lock):
-Thread 1: synchronized(lock) { check → null; store job }
-Thread 2: synchronized(lock) { check → exists; return busy }
+// With file-level locking:
+val lockKey = "$path/$fileName"
+fileLocks[lockKey].withLock {
+    // Only one upload can write to this file at a time
+}
 ```
 
-#### 3. Why Terminal State Protection?
+#### 3. Why State Machine with Atomic Transitions?
 
-Prevents "ghost progress" after user pauses:
+Prevents invalid state transitions and race conditions:
+
+```kotlin
+// Without state machine:
+Thread 1: Upload is UPLOADING, transitioning to PAUSED
+Thread 2: Reads state as UPLOADING, also tries to pause
+Thread 1: Updates state to PAUSED
+Thread 2: Updates state to PAUSED (redundant, but safe)
+
+// With atomic state machine:
+Thread 1: compareAndSet(UPLOADING → PAUSED) → success
+Thread 2: compareAndSet(UPLOADING → PAUSED) → fails, state is now PAUSED
+Thread 2: Returns false, caller knows pause already in progress
+```
+
+#### 4. Why Offset Validation?
+
+Prevents duplicate bytes and data corruption on resume:
 
 ```
-Without protection:
-1. User clicks Pause → status = PAUSED
-2. Server cancels job → CancellationException
-3. Late progress callback arrives → Updates bytes to 500KB
-4. UI shows "Paused at 500KB" but actually PAUSED
-
-With protection:
-1. User clicks Pause → status = PAUSED (terminal)
-2. Late progress callback → updateProgress() returns early
-3. UI stays at "Paused at 300KB" (correct)
+Browser claims: "I've sent 1000 bytes already"
+Server checks: "File on disk has 800 bytes"
+Result: Mismatch! Browser's offset is wrong.
+Action: Return 409 CONFLICT with actual disk size.
+Browser: Restart upload from byte 800.
 ```
-
-#### 4. Why MediaStore Query for Cancel?
-
-SAF and MediaStore store files differently. For reliable deletion:
-
-1. **Primary**: Direct MediaStore query by filename (works regardless of path)
-2. **Fallback**: Repository-based lookup with path guessing
-
-This ensures cancel always deletes the partial file, even if the file was created via a different storage method.
 
 Tech Stack & Best Practices
 ---------------------------
@@ -355,7 +318,7 @@ Tech Stack & Best Practices
 | **UI** | Jetpack Compose with Immutable Collections (`kotlinx-collections-immutable`) |
 | **Architecture** | Multi-module Clean Architecture + MVI |
 | **DI** | Hilt (Dagger) |
-| **HTTP Server** | NanoHTTPD |
+| **HTTP Server** | Ktor (CIO engine) |
 | **Storage** | MediaStore (default) + SAF (optional) |
 | **Minimum SDK** | 31 (Android 12) |
 | **Target SDK** | 36 (Android 16 Preview) |
@@ -384,7 +347,7 @@ Build & Run
 Security Notes
 --------------
 
-- **Local Only**: All traffic is restricted to your local network via a `SecurityInterceptor`. The app rejects requests from outside the LAN (192.168.x.x, 10.x.x.x, 172.16-31.x.x ranges).
+- **Local Only**: All traffic is restricted to your local network. The app rejects requests from outside the LAN (192.168.x.x, 10.x.x.x, 172.16-31.x.x ranges).
 - **Session Auth**: Every connection requires a unique, randomly generated session token created during QR code pairing.
 - **No Cloud**: Your files never touch a server outside your own device and computer. All transfers are peer-to-peer over your Wi-Fi.
 

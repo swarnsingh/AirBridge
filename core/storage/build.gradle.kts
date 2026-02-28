@@ -29,5 +29,6 @@ dependencies {
     implementation(libs.androidx.documentfile)
     implementation(libs.hilt.android)
     implementation(libs.kotlinx.coroutines.core)
+    implementation(libs.timber)
     ksp(libs.hilt.ksp)
 }

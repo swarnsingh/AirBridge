@@ -7,7 +7,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
-import android.util.Log
+import com.swaran.airbridge.core.common.logging.AirLogger
 import androidx.documentfile.provider.DocumentFile
 import com.swaran.airbridge.core.storage.datasource.MediaStoreDataSource
 import com.swaran.airbridge.core.storage.datasource.SafDataSource
@@ -67,7 +67,8 @@ import javax.inject.Inject
 class FileRepository @Inject constructor(
     @ApplicationContext private val context: Context,
     private val mediaStoreDataSource: MediaStoreDataSource,
-    private val safDataSource: SafDataSource
+    private val safDataSource: SafDataSource,
+    private val logger: AirLogger
 ) : StorageRepository, StorageAccessManager {
 
     /**
@@ -88,7 +89,7 @@ class FileRepository @Inject constructor(
                 // Validate on startup - permissions may have been revoked
                 validateSafUri(safTreeUri!!)
             } catch (e: Exception) {
-                Log.w(TAG, "Failed to restore SAF tree URI", e)
+                logger.w(TAG, "init", e, "Failed to restore SAF tree URI")
             }
         }
     }
@@ -106,7 +107,7 @@ class FileRepository @Inject constructor(
         return try {
             val doc = DocumentFile.fromTreeUri(context, uri)
             if (doc == null || !doc.exists() || !doc.canWrite()) {
-                Log.w(TAG, "Persisted SAF URI is no longer valid or writable")
+                logger.w(TAG, "validateSafUri", "Persisted SAF URI is no longer valid or writable")
                 resetToDefaultDirectory()
                 false
             } else true
@@ -134,7 +135,7 @@ class FileRepository @Inject constructor(
             val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
             context.contentResolver.takePersistableUriPermission(uri, flags)
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to persist URI permission", e)
+            logger.w(TAG, "setStorageDirectory", e, "Failed to persist URI permission")
         }
     }
 
@@ -280,21 +281,44 @@ class FileRepository @Inject constructor(
         totalBytes: Long,
         append: Boolean,
         onProgress: (Long) -> Unit
-    ): Result<FileItem> = runCatching {
-        if (safTreeUri != null && validateSafUri(safTreeUri!!)) {
-            // SAF storage path
-            val root = DocumentFile.fromTreeUri(context, safTreeUri!!)!!
-            val dir = safDataSource.findDirectory(root, path) ?: throw IllegalStateException("Directory not found")
-            val targetFile = dir.findFile(fileName) ?: dir.createFile("*/*", fileName) ?: throw IllegalStateException("Failed access")
-            
-            context.contentResolver.openOutputStream(targetFile.uri, if (append) "wa" else "wt")?.use { output ->
-                inputStream.copyToCancellable(output, onProgress = onProgress)
-            } ?: throw IllegalStateException("Failed write")
-            safDataSource.fileNodeFromDocument(targetFile, path).toDomain()
-        } else {
-            // MediaStore storage path
-            val relativePath = "${Environment.DIRECTORY_DOWNLOADS}/AirBridge${if (path != "/") "/$path" else ""}"
-            uploadToMediaStore(fileName, relativePath, inputStream, append, onProgress)
+    ): Result<FileItem> {
+        logger.d(TAG, "uploadFile", "[$uploadId] Starting upload: path='$path', fileName='$fileName', append=$append, safTreeUri=$safTreeUri")
+        
+        return try {
+            val result = if (safTreeUri != null && validateSafUri(safTreeUri!!)) {
+                // SAF storage path
+                logger.d(TAG, "uploadFile", "[$uploadId] Using SAF storage")
+                val root = DocumentFile.fromTreeUri(context, safTreeUri!!)!!
+                val dir = safDataSource.findDirectory(root, path) ?: throw IllegalStateException("Directory not found: $path")
+                logger.d(TAG, "uploadFile", "[$uploadId] Found directory: ${dir.uri}")
+                
+                val targetFile = dir.findFile(fileName) ?: dir.createFile("*/*", fileName) ?: throw IllegalStateException("Failed to create/access file: $fileName")
+                logger.d(TAG, "uploadFile", "[$uploadId] Target file: ${targetFile.uri}, append=$append")
+                
+                context.contentResolver.openOutputStream(targetFile.uri, if (append) "wa" else "wt")?.use { output ->
+                    logger.d(TAG, "uploadFile", "[$uploadId] Output stream opened, starting copy")
+                    inputStream.copyToCancellable(output, onProgress = onProgress)
+                    logger.d(TAG, "uploadFile", "[$uploadId] Copy completed")
+                } ?: throw IllegalStateException("Failed to open output stream for ${targetFile.uri}")
+                safDataSource.fileNodeFromDocument(targetFile, path).toDomain()
+            } else {
+                // MediaStore storage path
+                logger.d(TAG, "uploadFile", "[$uploadId] Using MediaStore storage")
+                val relativePath = "${Environment.DIRECTORY_DOWNLOADS}/AirBridge${if (path != "/") "/$path" else ""}"
+                logger.d(TAG, "uploadFile", "[$uploadId] MediaStore relativePath: $relativePath")
+                uploadToMediaStore(fileName, relativePath, inputStream, append, onProgress)
+            }
+            Result.success(result)
+        } catch (e: Exception) {
+            // Don't wrap control-flow exceptions - let them propagate
+            if (e is kotlinx.coroutines.CancellationException ||
+                e.javaClass.name.contains("UploadPaused") ||
+                e.javaClass.name.contains("UploadCancelled")) {
+                logger.d(TAG, "uploadFile", "[$uploadId] Control exception, rethrowing: ${e.javaClass.simpleName}")
+                throw e
+            }
+            logger.e(TAG, "uploadFile", e, "[$uploadId] Upload failed: ${e.javaClass.simpleName}: ${e.message}")
+            Result.failure(e)
         }
     }
 
@@ -308,8 +332,16 @@ class FileRepository @Inject constructor(
      */
     override suspend fun deleteFile(fileId: String): Result<Unit> = runCatching {
         val uri = Uri.parse(fileId)
-        val docFile = DocumentFile.fromSingleUri(context, uri)
-        if (docFile == null || !docFile.delete()) throw IllegalStateException("Delete failed")
+        
+        // For MediaStore URIs, use ContentResolver directly
+        if (uri.authority == "media") {
+            val deleted = context.contentResolver.delete(uri, null, null)
+            if (deleted == 0) throw IllegalStateException("MediaStore delete failed: $fileId")
+        } else {
+            // For SAF URIs, use DocumentFile
+            val docFile = DocumentFile.fromSingleUri(context, uri)
+            if (docFile == null || !docFile.delete()) throw IllegalStateException("SAF delete failed: $fileId")
+        }
     }
 
     /**
@@ -377,34 +409,59 @@ class FileRepository @Inject constructor(
      * @return The created/existing file metadata
      */
     private suspend fun uploadToMediaStore(fileName: String, relativePath: String, inputStream: InputStream, append: Boolean, onProgress: (Long) -> Unit): FileItem {
+        logger.d(TAG, "uploadToMediaStore", "fileName=$fileName, relativePath=$relativePath, append=$append")
         val contentResolver = context.contentResolver
         val uri = if (append) {
             // Find existing file for resume
-            mediaStoreDataSource.queryFiles().find { it.name == fileName && it.path.contains(relativePath) }?.let { Uri.parse(it.uri) } ?: throw IllegalStateException("Missing")
+            logger.d(TAG, "uploadToMediaStore", "Looking for existing file for resume")
+            mediaStoreDataSource.queryFiles().find { it.name == fileName && it.path.contains(relativePath) }?.let { Uri.parse(it.uri) } ?: throw IllegalStateException("Resume file not found: $fileName in $relativePath")
         } else {
             // Delete any existing file with same name
-            mediaStoreDataSource.queryFiles().find { it.name == fileName && it.path.contains(relativePath) }?.let { contentResolver.delete(Uri.parse(it.uri), null, null) }
+            logger.d(TAG, "uploadToMediaStore", "Checking for existing file to delete")
+            mediaStoreDataSource.queryFiles().find { it.name == fileName && it.path.contains(relativePath) }?.let { 
+                logger.d(TAG, "uploadToMediaStore", "Deleting existing file: ${it.uri}")
+                contentResolver.delete(Uri.parse(it.uri), null, null) 
+            }
             // Create new file entry
+            logger.d(TAG, "uploadToMediaStore", "Creating new file entry in MediaStore")
             val values = ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
                 put(MediaStore.MediaColumns.MIME_TYPE, getMimeType(fileName))
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
             }
-            contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: throw IllegalStateException("Insert failed")
+            contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: throw IllegalStateException("MediaStore insert failed for $fileName")
         }
+        logger.d(TAG, "uploadToMediaStore", "File URI obtained: $uri, mode=${if (append) "wa" else "wt"}")
 
         try {
+            logger.d(TAG, "uploadToMediaStore", "Opening output stream")
             contentResolver.openOutputStream(uri, if (append) "wa" else "wt")?.use { output ->
+                logger.d(TAG, "uploadToMediaStore", "Output stream opened, starting copy")
                 inputStream.copyToCancellable(output, onProgress = onProgress)
-            } ?: throw IllegalStateException("Write failed")
+                logger.d(TAG, "uploadToMediaStore", "Copy completed successfully")
+            } ?: throw IllegalStateException("Failed to open output stream for $uri")
         } catch (e: Exception) {
-            // Only delete partial file on actual errors, NOT on CancellationException
-            // (which is used for pause - we want to keep partial files for resume).
-            // Cancel explicitly deletes via cancelUpload() after job.join().
-            if (!append && e !is CancellationException) contentResolver.delete(uri, null, null)
+            // Don't delete on CancellationException (pause) or UploadPausedException
+            // We want to keep partial files for resume
+            val isPauseException = e is kotlinx.coroutines.CancellationException || 
+                                   e.javaClass.name.contains("UploadPaused")
+            
+            if (!isPauseException && !append) {
+                logger.d(TAG, "uploadToMediaStore", "Deleting partial file after error: ${e.javaClass.simpleName}")
+                contentResolver.delete(uri, null, null)
+            } else if (isPauseException) {
+                logger.d(TAG, "uploadToMediaStore", "Pause detected, keeping partial file for resume")
+            }
             throw e
         }
-        return mediaStoreDataSource.queryFiles().find { it.uri == uri.toString() }?.toDomain() ?: throw IllegalStateException("Missing")
+        logger.d(TAG, "uploadToMediaStore", "Querying final file metadata")
+        // FIX: queryFiles() builds URIs as "content://media/external/file/$id" but
+        // contentResolver.insert() returns "content://media/external/downloads/$id".
+        // Different paths → URI string comparison always fails.
+        // Extract the numeric ID from the insert URI and match by ID instead.
+        val insertedId = uri.lastPathSegment
+        return mediaStoreDataSource.queryFiles().find { it.id == insertedId }?.toDomain()
+            ?: throw IllegalStateException("Failed to find uploaded file in MediaStore: id=$insertedId, uri=$uri")
     }
 
     /**

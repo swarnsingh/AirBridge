@@ -13,6 +13,12 @@ sealed class DashboardEffect : MviEffect {
     data class ShowError(val message: String) : DashboardEffect()
 
     /**
+     * Show info/toast message.
+     * @property message Info message to display
+     */
+    data class ShowInfo(val message: String) : DashboardEffect()
+
+    /**
      * Show QR code dialog.
      * @property url URL to encode in QR code
      */

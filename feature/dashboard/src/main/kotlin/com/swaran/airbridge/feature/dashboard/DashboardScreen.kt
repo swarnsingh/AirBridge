@@ -53,9 +53,9 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.tooling.preview.PreviewParameter
 import androidx.compose.ui.tooling.preview.PreviewParameterProvider
 import androidx.compose.ui.unit.dp
-import com.swaran.airbridge.core.network.controller.UploadProgress
 import com.swaran.airbridge.domain.model.ServerStatus
 import com.swaran.airbridge.feature.dashboard.mvi.DashboardState
+import com.swaran.airbridge.feature.dashboard.viewmodel.UploadProgress
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.persistentListOf
 

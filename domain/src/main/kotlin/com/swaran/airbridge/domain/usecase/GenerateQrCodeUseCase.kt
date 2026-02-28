@@ -27,12 +27,13 @@ class GenerateQrCodeUseCase @Inject constructor(
             
             if (status is ServerStatus.Running) {
                 // Use the existing session token from the running server
-                val address = serverRepository.getServerAddress() ?: "http://localhost:8080"
+                val address = serverRepository.getServerAddress() ?: "http://localhost:${status.port}"
                 "$address/?token=${status.sessionToken}"
             } else {
                 // Server not running, generate new session
                 val session = sessionRepository.generateSession()
-                val address = serverRepository.getServerAddress() ?: "http://${session.serverAddress}:8080"
+                val address = serverRepository.getServerAddress()
+                    ?: "http://${session.serverAddress}:${session.serverPort}"
                 "$address/?token=${session.token}"
             }
         }

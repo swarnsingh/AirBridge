@@ -21,8 +21,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import com.swaran.airbridge.core.network.controller.UploadProgress
 import com.swaran.airbridge.domain.model.TransferStatus
+import com.swaran.airbridge.feature.dashboard.viewmodel.UploadProgress
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.persistentListOf
 import java.util.Locale
@@ -52,6 +52,9 @@ fun UploadProgressCard(
                 modifier = Modifier.heightIn(max = 500.dp),
                 contentPadding = PaddingValues(vertical = 4.dp)
             ) {
+                // Key is just the upload ID — stable identity for the item.
+                // Compose re-renders the item when content changes (percentage, status).
+                // animateFloatAsState works correctly because same item instance is reused.
                 items(activeUploads, key = { it.id }) { progress ->
                     UploadProgressItem(
                         progress = progress,
