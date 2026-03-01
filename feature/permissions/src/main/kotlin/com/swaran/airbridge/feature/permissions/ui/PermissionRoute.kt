@@ -37,7 +37,8 @@ fun PermissionRoute(
         viewModel.sendIntent(PermissionIntent.OnPermissionResult(granted))
     }
 
-    LaunchedEffect(Unit) {
+    // Handle navigation/system effects in Route
+    LaunchedEffect(viewModel.effect) {
         viewModel.effect.collect { effect ->
             when (effect) {
                 is PermissionEffect.NavigateToDashboard -> onNavigateToDashboard()
@@ -72,7 +73,7 @@ fun PermissionRoute(
 
     PermissionScreen(
         state = state,
-        onRequestPermission = { viewModel.sendIntent(PermissionIntent.RequestStoragePermission) }
+        onIntent = viewModel::sendIntent
     )
 }
 

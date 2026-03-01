@@ -30,4 +30,9 @@ sealed class FileBrowserIntent : MviIntent {
      * Navigate up to the parent directory.
      */
     data object NavigateUp : FileBrowserIntent()
+
+    /**
+     * Navigate back from file browser feature.
+     */
+    data object NavigateBack : FileBrowserIntent()
 }

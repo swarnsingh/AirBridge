@@ -93,10 +93,9 @@ class ThermalMonitor @Inject constructor(
         monitoringJob?.cancel()
         monitoringJob = null
 
-        // If we paused uploads due to thermal, resume them now
+        // If we paused uploads due to thermal, they'll resume via browser POST
         if (wasPausedByThermal) {
-            logger.d(TAG, "log", "Auto-resuming uploads after thermal monitoring stopped")
-            uploadScheduler.resumeAll()
+            logger.d(TAG, "log", "Uploads were paused by thermal - will resume via browser POST")
             wasPausedByThermal = false
         }
     }
@@ -114,15 +113,16 @@ class ThermalMonitor @Inject constructor(
 
         when {
             status >= PAUSE_THRESHOLD && !wasPausedByThermal -> {
-                // Device is overheating - pause uploads
+                // Device is overheating - pause all uploads
                 logger.w(TAG, "checkThermalStatus", "Thermal status SEVERE+ ($status) - pausing all uploads")
-                uploadScheduler.pauseAll()
+                uploadScheduler.activeUploads.value.keys.forEach { uploadId ->
+                    uploadScheduler.pause(uploadId)
+                }
                 wasPausedByThermal = true
             }
             status <= RESUME_THRESHOLD && wasPausedByThermal -> {
-                // Device has cooled down - resume uploads
-                logger.i(TAG, "checkThermalStatus", "Thermal status returned to normal ($status) - resuming uploads")
-                uploadScheduler.resumeAll()
+                // Device has cooled down - uploads will resume via browser POST
+                logger.i(TAG, "checkThermalStatus", "Thermal status returned to normal ($status) - uploads will resume via browser POST")
                 wasPausedByThermal = false
             }
         }

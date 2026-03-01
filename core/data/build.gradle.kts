@@ -31,9 +31,20 @@ dependencies {
     implementation(project(":core:storage"))
     implementation(project(":core:network"))
     implementation(project(":core:service"))
+    
+    // Hilt
     ksp(libs.hilt.ksp)
     implementation(libs.hilt.android)
+    
+    // Coroutines & Serialization
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.serialization.json)
+    
+    // Logging
     implementation(libs.timber)
+    
+    // Room Database
+    implementation(libs.room.runtime)
+    implementation(libs.room.ktx)
+    ksp(libs.room.compiler)
 }

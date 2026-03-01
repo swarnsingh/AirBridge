@@ -49,6 +49,37 @@ class MediaStoreDataSource @Inject constructor(
         return files
     }
 
+    /**
+     * Targeted query for a single file by name and directory.
+     * Prevents full MediaStore scans which cause sequential blocking.
+     */
+    fun findFileByName(fileName: String, directory: String): FileNode? {
+        val projection = arrayOf(
+            MediaStore.Files.FileColumns._ID,
+            MediaStore.Files.FileColumns.DISPLAY_NAME,
+            MediaStore.Files.FileColumns.SIZE,
+            MediaStore.Files.FileColumns.MIME_TYPE,
+            MediaStore.Files.FileColumns.DATE_MODIFIED,
+            MediaStore.Files.FileColumns.DATA
+        )
+
+        val selection = "${MediaStore.Files.FileColumns.DISPLAY_NAME} = ? AND ${MediaStore.Files.FileColumns.DATA} LIKE ?"
+        val selectionArgs = arrayOf(fileName, "$directory/%")
+
+        contentResolver.query(
+            MediaStore.Files.getContentUri("external"),
+            projection,
+            selection,
+            selectionArgs,
+            null
+        )?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                return cursor.toFileNode()
+            }
+        }
+        return null
+    }
+
     fun getFileInputStream(fileId: String): InputStream? {
         val uri = MediaStore.Files.getContentUri("external").buildUpon()
             .appendPath(fileId)

@@ -6,7 +6,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.serialization.Serializable
 
 /**
- * Persistence layer for upload state.
+ * Persistence layer for upload state - Protocol v2.
  *
  * Responsibilities:
  * - Persist upload states to survive app kills / reboots
@@ -60,34 +60,30 @@ data class PersistedUpload(
     val bytesPerSecond: Float,
     val startedAtNanos: Long,
     val updatedAtNanos: Long,
-    val errorMessage: String?,
-    val retryCount: Int
+    val errorMessage: String?
 ) {
     /**
      * Check if this upload can be resumed after recovery.
+     * Protocol v2: Only UPLOADING and PAUSED can recover.
      */
     fun canRecover(): Boolean {
         val recoverableStates = setOf(
             UploadState.UPLOADING.name,
-            UploadState.PAUSING.name,
-            UploadState.PAUSED.name,
-            UploadState.RESUMING.name,
-            UploadState.ERROR_RETRYABLE.name
+            UploadState.PAUSED.name
         )
-        // Allow zero-byte files (>= 0 instead of > 0)
         return state in recoverableStates && bytesReceived >= 0 && bytesReceived < totalBytes
     }
 
     /**
      * Determine the correct recovery state after app restart.
+     * UPLOADING -> PAUSED (will resume via POST)
+     * PAUSED -> PAUSED (already paused)
      */
     fun recoveryState(): UploadState {
         return when (state) {
-            UploadState.UPLOADING.name, UploadState.RESUMING.name -> UploadState.ERROR_RETRYABLE
-            UploadState.PAUSING.name -> UploadState.PAUSED
+            UploadState.UPLOADING.name -> UploadState.PAUSED
             UploadState.PAUSED.name -> UploadState.PAUSED
-            UploadState.ERROR_RETRYABLE.name -> UploadState.ERROR_RETRYABLE
-            else -> UploadState.ERROR_PERMANENT
+            else -> UploadState.ERROR
         }
     }
 }

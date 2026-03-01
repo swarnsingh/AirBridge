@@ -11,6 +11,7 @@ data class DashboardState(
     val isLoading: Boolean = false,
     val serverStatus: ServerStatus = ServerStatus.Stopped,
     val serverAddress: String? = null,
+    val mdnsHostname: String? = null, // e.g., "AirBridge.local"
     val qrCodeUrl: String? = null,
     val isBrowserConnected: Boolean = false,
     val hasStoragePermission: Boolean = false,

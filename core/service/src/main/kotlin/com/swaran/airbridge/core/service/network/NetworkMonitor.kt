@@ -35,8 +35,8 @@ class NetworkMonitor @Inject constructor(
             val isWifi = isWifiNetwork(network)
             logger.d(TAG, "log", "Network available: isWifi=$isWifi")
             if (isWifi && !wasWifiConnected) {
-                logger.i(TAG, "log", "WiFi reconnected - resuming uploads")
-                uploadScheduler.resumeAll()
+                logger.i(TAG, "log", "WiFi reconnected - uploads will resume via browser POST")
+                // Resume is implicit - browser will POST from disk offset
                 wasWifiConnected = true
             }
         }
@@ -46,7 +46,9 @@ class NetworkMonitor @Inject constructor(
             logger.d(TAG, "log", "Network lost: isWifi=$isWifi")
             if (isWifi) {
                 logger.w(TAG, "log", "WiFi disconnected - pausing uploads")
-                uploadScheduler.pauseAll()
+                uploadScheduler.activeUploads.value.keys.forEach { uploadId ->
+                    uploadScheduler.pause(uploadId)
+                }
                 wasWifiConnected = false
             }
         }

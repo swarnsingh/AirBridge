@@ -37,16 +37,28 @@ class UploadActionReceiver : BroadcastReceiver() {
         when (intent.action) {
             UploadNotificationManager.ACTION_PAUSE_ALL -> {
                 logger.d(TAG, "log", "Received PAUSE_ALL action")
-                uploadScheduler.pauseAll()
+                uploadScheduler.activeUploads.value.keys.forEach { uploadId ->
+                    uploadScheduler.pause(uploadId)
+                }
             }
             UploadNotificationManager.ACTION_RESUME_ALL -> {
-                logger.d(TAG, "log", "Received RESUME_ALL action")
-                uploadScheduler.resumeAll()
+                logger.d(TAG, "log", "Received RESUME_ALL action - browser will resume via POST")
+                // Resume is implicit - browser will POST from disk offset
             }
             UploadNotificationManager.ACTION_CANCEL_ALL -> {
                 logger.d(TAG, "log", "Received CANCEL_ALL action")
                 CoroutineScope(ioDispatcher).launch {
-                    uploadScheduler.cancelAll()
+                    uploadScheduler.activeUploads.value.forEach { (uploadId, status) ->
+                        val request = com.swaran.airbridge.domain.model.UploadRequest(
+                            uploadId = uploadId,
+                            fileUri = "",
+                            fileName = status.metadata.displayName,
+                            path = status.metadata.path,
+                            offset = 0,
+                            totalBytes = 0
+                        )
+                        uploadScheduler.cancel(uploadId, request)
+                    }
                 }
             }
         }

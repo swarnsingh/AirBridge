@@ -40,6 +40,14 @@ dependencies {
     implementation(libs.kotlinx.collections.immutable)
     implementation(libs.timber)
 
+    // CameraX & QR Scanner
+    implementation(libs.camera.core)
+    implementation(libs.camera.camera2)
+    implementation(libs.camera.lifecycle)
+    implementation(libs.camera.view)
+    implementation(libs.ml.kit.barcode)
+    implementation(libs.accompanist.permissions)
+
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.material3)

@@ -87,14 +87,15 @@ class DozeModeMonitor @Inject constructor(
         val isInDoze = powerManager?.isDeviceIdleMode ?: false
         
         if (isInDoze && !wasInDoze) {
-            // Entered Doze mode
+            // Entered Doze mode - pause all active uploads
             logger.w(TAG, "checkDozeState", "Device entered Doze mode - pausing uploads")
-            uploadScheduler.pauseAll()
+            uploadScheduler.activeUploads.value.keys.forEach { uploadId ->
+                uploadScheduler.pause(uploadId)
+            }
             wasInDoze = true
         } else if (!isInDoze && wasInDoze) {
-            // Exited Doze mode
-            logger.i(TAG, "checkDozeState", "Device exited Doze mode - resuming uploads")
-            uploadScheduler.resumeAll()
+            // Exited Doze mode - browser will auto-resume via POST
+            logger.i(TAG, "checkDozeState", "Device exited Doze mode - uploads will resume automatically")
             wasInDoze = false
         }
     }

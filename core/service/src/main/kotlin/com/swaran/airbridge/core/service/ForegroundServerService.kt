@@ -16,10 +16,12 @@ import com.swaran.airbridge.core.common.Dispatcher
 import com.swaran.airbridge.core.network.SessionTokenManager
 import com.swaran.airbridge.core.network.ktor.KtorLocalServer
 import com.swaran.airbridge.core.network.upload.UploadScheduler
-import com.swaran.airbridge.core.service.notification.UploadNotificationManager
-import com.swaran.airbridge.core.service.network.NetworkMonitor
-import com.swaran.airbridge.core.service.thermal.ThermalMonitor
 import com.swaran.airbridge.core.service.doze.DozeModeMonitor
+import com.swaran.airbridge.core.service.mdns.AirBridgeMdnsService
+import com.swaran.airbridge.core.service.network.NetworkMonitor
+import com.swaran.airbridge.core.service.notification.UploadActionReceiver
+import com.swaran.airbridge.core.service.notification.UploadNotificationManager
+import com.swaran.airbridge.core.service.thermal.ThermalMonitor
 import com.swaran.airbridge.domain.model.UploadMetadata
 import com.swaran.airbridge.domain.model.UploadState
 import com.swaran.airbridge.domain.repository.UploadStatePersistence
@@ -79,6 +81,8 @@ class ForegroundServerService : Service() {
     lateinit var uploadStatePersistence: UploadStatePersistence
     @Inject
     lateinit var logger: AirLogger
+    @Inject
+    lateinit var mdnsService: AirBridgeMdnsService
 
     @Inject
     @Dispatcher(AirDispatchers.IO)
@@ -169,7 +173,7 @@ class ForegroundServerService : Service() {
                     uploadStateManager.transition(
                         uploadId = uploadId,
                         newState = recoveredState,
-                        errorMessage = if (recoveredState == UploadState.ERROR_RETRYABLE) {
+                        errorMessage = if (recoveredState == UploadState.ERROR) {
                             "Upload interrupted by app termination"
                         } else null
                     )
@@ -202,11 +206,24 @@ class ForegroundServerService : Service() {
                 _isRunning.value = true
                 serverPreferences.saveLastPort(port)
 
+                // Start mDNS service for airbridge.local discovery
+                val mdnsSuccess = mdnsService.start(port, session.serverAddress)
+                if (mdnsSuccess) {
+                    logger.i(TAG, "log", "mDNS service started: ${mdnsService.getMdnsHostname()} available")
+                }
+
                 observeUploadsAndUpdateNotification(port, session.serverAddress)
+
+                val mdnsHostname = mdnsService.getMdnsHostname()
+                val sharingText = if (mdnsHostname != null) {
+                    "Sharing at $mdnsHostname or ${session.serverAddress}:$port"
+                } else {
+                    "Sharing at ${session.serverAddress}:$port"
+                }
 
                 val notification = buildNotification(
                     "AirBridge is Active",
-                    "Sharing at ${session.serverAddress}:$port"
+                    sharingText
                 )
 
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
@@ -226,9 +243,12 @@ class ForegroundServerService : Service() {
     }
 
     private fun stopServer() {
-        ktorLocalServer.stop()
-        _isRunning.value = false
-        stopSelf()
+        serviceScope.launch {
+            mdnsService.stop()
+            ktorLocalServer.stop()
+            _isRunning.value = false
+            stopSelf()
+        }
     }
 
     private fun createNotificationChannel() {
@@ -265,27 +285,22 @@ class ForegroundServerService : Service() {
 
     private fun observeUploadsAndUpdateNotification(port: Int, serverAddress: String) {
         serviceScope.launch {
-            combine(
-                uploadStateManager.activeUploads,
-                uploadStateManager.isGlobalPaused
-            ) { uploads, isPaused ->
-                val activeUploads = uploads.values.filter { !it.isTerminal }
-                val stats = uploadStateManager.getAggregatedStats()
-                Triple(activeUploads, isPaused, stats)
-            }.collectLatest { (activeUploads, isPaused, stats) ->
-                val notification = if (activeUploads.isNotEmpty()) {
-                    notificationManager.buildUploadNotification(
-                        activeUploads = activeUploads,
-                        isGlobalPaused = isPaused,
-                        aggregatedStats = stats
-                    )
-                } else {
-                    notificationManager.buildIdleNotification(serverAddress, port)
-                }
+            uploadStateManager.activeUploads
+                .collectLatest { uploads ->
+                    val activeUploads = uploads.values.filter { !it.isTerminal }
+                    val isPaused = activeUploads.all { it.state == UploadState.PAUSED }
+                    val notification = if (activeUploads.isNotEmpty()) {
+                        notificationManager.buildUploadNotification(
+                            activeUploads = activeUploads,
+                            isGlobalPaused = isPaused
+                        )
+                    } else {
+                        notificationManager.buildIdleNotification(serverAddress, port)
+                    }
 
-                val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
-                nm.notify(UploadNotificationManager.UPLOAD_NOTIFICATION_ID, notification)
-            }
+                    val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+                    nm.notify(UploadNotificationManager.UPLOAD_NOTIFICATION_ID, notification)
+                }
         }
     }
 }

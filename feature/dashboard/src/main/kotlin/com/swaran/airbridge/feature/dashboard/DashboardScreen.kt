@@ -1,5 +1,6 @@
 package com.swaran.airbridge.feature.dashboard
 
+import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -38,6 +39,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -45,45 +47,66 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.tooling.preview.PreviewParameter
-import androidx.compose.ui.tooling.preview.PreviewParameterProvider
 import androidx.compose.ui.unit.dp
 import com.swaran.airbridge.domain.model.ServerStatus
+import com.swaran.airbridge.feature.dashboard.mvi.DashboardEffect
+import com.swaran.airbridge.feature.dashboard.mvi.DashboardIntent
 import com.swaran.airbridge.feature.dashboard.mvi.DashboardState
 import com.swaran.airbridge.feature.dashboard.viewmodel.UploadProgress
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.persistentListOf
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emptyFlow
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DashboardScreen(
     state: DashboardState,
     activeUploads: ImmutableList<UploadProgress>,
-    onStartServer: () -> Unit,
-    onStopServer: () -> Unit,
-    onGenerateQr: () -> Unit,
-    onGrantPermission: () -> Unit,
-    onBrowseFiles: () -> Unit,
-    onSelectDirectory: () -> Unit,
-    onSendFile: () -> Unit,
-    onOpenCamera: () -> Unit,
-    onPauseUpload: (String) -> Unit,
-    onResumeUpload: (String) -> Unit,
-    onCancelUpload: (String) -> Unit
+    effectFlow: Flow<DashboardEffect>,
+    onIntent: (DashboardIntent) -> Unit
 ) {
+    val context = LocalContext.current
     var showConnectDialog by remember { mutableStateOf(false) }
+
+    // Collect effects from ViewModel
+    LaunchedEffect(effectFlow) {
+        effectFlow.collect { effect ->
+            when (effect) {
+                is DashboardEffect.ShowError -> {
+                    Toast.makeText(context, effect.message, Toast.LENGTH_LONG).show()
+                }
+                is DashboardEffect.ShowInfo -> {
+                    Toast.makeText(context, effect.message, Toast.LENGTH_SHORT).show()
+                }
+                is DashboardEffect.ShowQrCode -> {
+                    // QR code shown via dialog, state handles this
+                }
+                is DashboardEffect.NavigateToPermissions -> {
+                    // Navigation handled by Route
+                }
+                is DashboardEffect.NavigateToFileBrowser -> {
+                    // Navigation handled by Route
+                }
+                is DashboardEffect.LaunchStorageDirectoryPicker -> {
+                    // Directory picker launch handled by Route
+                }
+            }
+        }
+    }
 
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text(stringResource(id = R.string.app_name)) },
                 actions = {
-                    IconButton(onClick = onSelectDirectory) {
+                    IconButton(onClick = { onIntent(DashboardIntent.RequestStorageDirectory) }) {
                         Icon(
                             Icons.Default.Settings,
                             contentDescription = stringResource(id = R.string.storage_location)
@@ -98,32 +121,31 @@ fun DashboardScreen(
                 .fillMaxSize()
                 .padding(paddingValues)
         ) {
-            if (state.isLoading) {
-                CircularProgressIndicator(
-                    modifier = Modifier.align(Alignment.Center)
-                )
-            } else {
-                DashboardContent(
-                    state = state,
-                    activeUploads = activeUploads,
-                    onStartServer = onStartServer,
-                    onStopServer = onStopServer,
-                    onShowConnect = { showConnectDialog = true },
-                    onBrowseFiles = onBrowseFiles,
-                    onSendFile = onSendFile,
-                    onPauseUpload = onPauseUpload,
-                    onResumeUpload = onResumeUpload,
-                    onCancelUpload = onCancelUpload
-                )
-            }
+            // Content always visible
+            DashboardContent(
+                state = state,
+                activeUploads = activeUploads,
+                isLoading = state.isLoading,
+                onStartServer = { onIntent(DashboardIntent.StartServer) },
+                onStopServer = { onIntent(DashboardIntent.StopServer) },
+                onShowConnect = { showConnectDialog = true },
+                onBrowseFiles = { onIntent(DashboardIntent.NavigateToFileBrowser) },
+                onSendFile = { onIntent(DashboardIntent.NavigateToFileBrowser) },
+                onPauseUpload = { onIntent(DashboardIntent.PauseUpload(it)) },
+                onResumeUpload = { onIntent(DashboardIntent.ResumeUpload(it)) },
+                onCancelUpload = { onIntent(DashboardIntent.CancelUpload(it)) }
+            )
 
             if (showConnectDialog && state.serverStatus is ServerStatus.Running) {
+                val runningStatus = state.serverStatus
                 ConnectBrowserDialog(
                     serverAddress = state.serverAddress,
+                    mdnsHostname = state.mdnsHostname,
+                    port = runningStatus.port,
                     onDismiss = { showConnectDialog = false },
                     onScanQr = {
                         showConnectDialog = false
-                        onOpenCamera()
+                        onIntent(DashboardIntent.ScanQrCode)
                     }
                 )
             }
@@ -135,6 +157,7 @@ fun DashboardScreen(
 private fun DashboardContent(
     state: DashboardState,
     activeUploads: ImmutableList<UploadProgress>,
+    isLoading: Boolean,
     onStartServer: () -> Unit,
     onStopServer: () -> Unit,
     onShowConnect: () -> Unit,
@@ -153,7 +176,8 @@ private fun DashboardContent(
     ) {
         ServerStatusCard(
             status = state.serverStatus,
-            address = state.serverAddress,
+            mdnsHostname = state.mdnsHostname,
+            isLoading = isLoading,
             onStart = onStartServer,
             onStop = onStopServer
         )
@@ -167,19 +191,22 @@ private fun DashboardContent(
                     modifier = Modifier.weight(1f),
                     icon = Icons.Default.Devices,
                     label = stringResource(id = R.string.connect_browser),
-                    onClick = onShowConnect
+                    onClick = onShowConnect,
+                    enabled = !isLoading
                 )
                 ActionCard(
                     modifier = Modifier.weight(1f),
                     icon = Icons.Default.Folder,
                     label = stringResource(id = R.string.browse_files),
-                    onClick = onBrowseFiles
+                    onClick = onBrowseFiles,
+                    enabled = !isLoading
                 )
                 ActionCard(
                     modifier = Modifier.weight(1f),
                     icon = Icons.AutoMirrored.Filled.Send,
                     label = stringResource(id = R.string.send_file_to_computer),
-                    onClick = onSendFile
+                    onClick = onSendFile,
+                    enabled = !isLoading
                 )
             }
         }
@@ -200,7 +227,8 @@ private fun DashboardContent(
 @Composable
 private fun ServerStatusCard(
     status: ServerStatus,
-    address: String?,
+    mdnsHostname: String?,
+    isLoading: Boolean,
     onStart: () -> Unit,
     onStop: () -> Unit
 ) {
@@ -227,11 +255,22 @@ private fun ServerStatusCard(
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )
-                if (isRunning && address != null) {
-                    run {
+                if (status is ServerStatus.Running) {
+                    val port = status.port
+                    val ip = status.address
+                    val mdnsLabel = mdnsHostname?.let { "@$it:$port" }
+                    val ipLabel = "@$ip:$port"
+
+                    Text(
+                        text = stringResource(id = R.string.server_address, mdnsLabel ?: ipLabel),
+                        style = MaterialTheme.typography.bodySmall
+                    )
+
+                    if (mdnsLabel != null) {
                         Text(
-                            text = stringResource(id = R.string.server_address, address),
-                            style = MaterialTheme.typography.bodySmall
+                            text = "IP: $ipLabel",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
@@ -239,15 +278,24 @@ private fun ServerStatusCard(
 
             Button(
                 onClick = if (isRunning) onStop else onStart,
+                enabled = !isLoading,
                 colors = ButtonDefaults.buttonColors(
                     containerColor = if (isRunning) MaterialTheme.colorScheme.error
                     else MaterialTheme.colorScheme.primary
                 )
             ) {
-                Text(
-                    if (isRunning) stringResource(id = R.string.stop_server)
-                    else stringResource(id = R.string.start_server)
-                )
+                if (isLoading) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.onPrimary
+                    )
+                } else {
+                    Text(
+                        if (isRunning) stringResource(id = R.string.stop_server)
+                        else stringResource(id = R.string.start_server)
+                    )
+                }
             }
         }
     }
@@ -258,10 +306,12 @@ private fun ActionCard(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     label: String,
     onClick: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true
 ) {
     OutlinedCard(
         onClick = onClick,
+        enabled = enabled,
         modifier = modifier.height(100.dp),
         colors = CardDefaults.outlinedCardColors(
             containerColor = MaterialTheme.colorScheme.surface
@@ -316,10 +366,19 @@ private fun StorageLocationSection(
 @Composable
 private fun ConnectBrowserDialog(
     serverAddress: String?,
+    mdnsHostname: String?,
+    port: Int,
     onDismiss: () -> Unit,
     onScanQr: () -> Unit
 ) {
     val clipboardManager = LocalClipboardManager.current
+
+    val displayLabel = mdnsHostname?.let { "@$it:$port" }
+        ?: serverAddress?.let { "@$it:$port" }
+        ?: ""
+    val displayUrl = mdnsHostname?.let { "http://$it:$port" }
+        ?: serverAddress?.let { "http://$it:$port" }
+        ?: ""
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -371,14 +430,15 @@ private fun ConnectBrowserDialog(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
-                        text = serverAddress ?: "",
-                        style = MaterialTheme.typography.bodySmall,
+                        text = displayLabel,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium,
                         modifier = Modifier.weight(1f)
                     )
                     IconButton(
                         onClick = {
-                            serverAddress?.let {
-                                clipboardManager.setText(AnnotatedString(it))
+                            if (displayUrl.isNotEmpty()) {
+                                clipboardManager.setText(AnnotatedString(displayUrl))
                             }
                         }
                     ) {
@@ -388,6 +448,34 @@ private fun ConnectBrowserDialog(
                             modifier = Modifier.size(20.dp),
                             tint = MaterialTheme.colorScheme.primary
                         )
+                    }
+                }
+
+                if (mdnsHostname != null && serverAddress != null) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "IP: @$serverAddress:$port",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f)
+                        )
+                        IconButton(
+                            onClick = {
+                                clipboardManager.setText(AnnotatedString("http://$serverAddress:$port"))
+                            }
+                        ) {
+                            Icon(
+                                Icons.Default.ContentCopy,
+                                contentDescription = "Copy IP URL",
+                                modifier = Modifier.size(16.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
                 }
             }
@@ -400,7 +488,7 @@ private fun ConnectBrowserDialog(
     )
 }
 
-class DashboardStateProvider : PreviewParameterProvider<DashboardState> {
+class DashboardStateProvider : androidx.compose.ui.tooling.preview.PreviewParameterProvider<DashboardState> {
     override val values = sequenceOf(
         DashboardState(isLoading = true),
         DashboardState(
@@ -410,12 +498,13 @@ class DashboardStateProvider : PreviewParameterProvider<DashboardState> {
         ),
         DashboardState(
             serverStatus = ServerStatus.Running("192.168.1.100", 8080, "token"),
-            serverAddress = "192.168.1.100"
+            serverAddress = "192.168.1.100",
+            mdnsHostname = "AirBridge.local"
         ),
     )
 }
 
-@Preview(showBackground = true)
+@androidx.compose.ui.tooling.preview.Preview(showBackground = true)
 @Composable
 fun DashboardScreenPreview(
     @PreviewParameter(DashboardStateProvider::class) state: DashboardState
@@ -424,17 +513,8 @@ fun DashboardScreenPreview(
         DashboardScreen(
             state = state,
             activeUploads = persistentListOf(),
-            onStartServer = {},
-            onStopServer = {},
-            onGenerateQr = {},
-            onGrantPermission = {},
-            onBrowseFiles = {},
-            onSelectDirectory = {},
-            onSendFile = {},
-            onOpenCamera = {},
-            onPauseUpload = {},
-            onResumeUpload = {},
-            onCancelUpload = {}
+            effectFlow = emptyFlow(),
+            onIntent = {}
         )
     }
 }

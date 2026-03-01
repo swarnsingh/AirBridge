@@ -30,6 +30,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     compileOptions {
@@ -54,6 +55,8 @@ dependencies {
     implementation(project(":feature:filebrowser"))
     implementation(project(":feature:permissions"))
     implementation(project(":web"))
+    implementation(libs.workmanager.runtime)
+    implementation(libs.hilt.workmanager)
 
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.core.ktx)

@@ -77,8 +77,7 @@ class FileUploadStatePersistence @Inject constructor(
             bytesPerSecond = status.bytesPerSecond,
             startedAtNanos = status.startedAt,
             updatedAtNanos = status.updatedAt,
-            errorMessage = status.errorMessage,
-            retryCount = status.retryCount
+            errorMessage = status.errorMessage
         )
 
         writeMutex.withLock {
@@ -214,7 +213,7 @@ class FileUploadStatePersistence @Inject constructor(
     }
 
     private fun UploadState.isTerminal(): Boolean {
-        return this in setOf(UploadState.COMPLETED, UploadState.CANCELLED, UploadState.ERROR_PERMANENT)
+        return this in setOf(UploadState.COMPLETED, UploadState.CANCELLED, UploadState.ERROR)
     }
 }
 

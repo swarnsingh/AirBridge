@@ -31,5 +31,6 @@ dependencies {
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.hilt.android)
     implementation(libs.timber)
+    implementation(libs.jmdns)
     ksp(libs.hilt.ksp)
 }

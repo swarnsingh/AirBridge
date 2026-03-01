@@ -10,6 +10,7 @@ import com.swaran.airbridge.core.network.ktor.routes.FileRoutes
 import com.swaran.airbridge.core.network.ktor.routes.UploadRoutes
 import com.swaran.airbridge.core.network.ktor.routes.PairingPushZipRoutes
 import com.swaran.airbridge.core.network.ktor.routes.healthRoute
+import com.swaran.airbridge.core.network.ktor.routes.apiDocsRoute
 import com.swaran.airbridge.domain.repository.StorageRepository
 import dagger.hilt.android.qualifiers.ApplicationContext
 import io.ktor.http.HttpHeaders
@@ -18,6 +19,7 @@ import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.application.install
 import io.ktor.server.cio.CIO
 import io.ktor.server.engine.embeddedServer
+import io.ktor.server.plugins.calllogging.CallLogging
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.plugins.cors.routing.CORS
 import io.ktor.server.routing.routing
@@ -118,10 +120,13 @@ class KtorLocalServer @Inject constructor(
                     allowMethod(HttpMethod.Delete)
                 }
 
-                // Note: CallLogging plugin omitted in Phase 1 for simplicity
-                // Can be added later with: install(CallLogging)
+                // Structured request logging with CallLogging
+                install(CallLogging)
 
                 routing {
+                    // API Documentation (OpenAPI/Swagger)
+                    apiDocsRoute()
+
                     // Phase 2: Health and static routes (with Cache-Control: no-store)
                     healthRoute()
                     staticRoutes.install(this)
@@ -149,14 +154,15 @@ class KtorLocalServer @Inject constructor(
     }
 
     /**
-     * Stops the Ktor server gracefully.
+     * Stops the Ktor server gracefully but quickly.
      *
-     * Waits up to 2 seconds for active connections to complete.
-     * Uploads/downloads in progress will be interrupted.
+     * Uses short timeouts (100ms grace + 500ms max) for responsive UI.
+     * Active uploads/downloads may be interrupted.
      */
     override fun stop() {
         try {
-            engine?.stop(gracePeriodMillis = 1000, timeoutMillis = 2000)
+            // Quick stop - don't wait long for connections
+            engine?.stop(gracePeriodMillis = 100, timeoutMillis = 500)
             logger.i(TAG, "log", "Ktor server stopped")
         } catch (e: Exception) {
             logger.w(TAG, "log", "Error stopping server", e)

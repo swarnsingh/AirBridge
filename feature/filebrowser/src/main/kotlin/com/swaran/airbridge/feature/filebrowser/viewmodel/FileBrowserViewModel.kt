@@ -38,6 +38,7 @@ class FileBrowserViewModel @Inject constructor(
             is FileBrowserIntent.NavigateToFolder -> navigateToFolder(intent.path)
             is FileBrowserIntent.SelectFile -> selectFile(intent.file)
             is FileBrowserIntent.NavigateUp -> navigateUp()
+            is FileBrowserIntent.NavigateBack -> { /* Handled in Route */ }
         }
     }
 

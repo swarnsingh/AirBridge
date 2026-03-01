@@ -1,74 +1,68 @@
 package com.swaran.airbridge.domain.model
 
 /**
- * Upload state machine states.
- * 
- * State transitions are enforced - invalid transitions return false.
+ * Upload state machine states - deterministic protocol v2.
+ *
+ * Only 6 states. No transitional states (RESUMING, PAUSING, ERROR_RETRYABLE).
+ * Disk size is source of truth. Resume is implicit.
  */
 enum class UploadState {
-    QUEUED,      // Waiting to start
+    NONE,        // No upload registered
     UPLOADING,   // Actively receiving bytes
-    PAUSING,     // Pause requested, finishing current chunk
     PAUSED,      // Suspended, can resume
-    RESUMING,    // Resume requested, validating offset
     COMPLETED,   // All bytes received successfully
-    CANCELLED,   // User cancelled
-    ERROR_RETRYABLE,   // Failed but can retry (network, storage transient)
-    ERROR_PERMANENT;  // Failed permanently (SAF permission, file deleted)
-    
+    CANCELLED,   // User cancelled, partial deleted
+    ERROR;       // Permanent error (permission, deleted, etc)
+
     fun canTransitionTo(target: UploadState): Boolean {
+        if (this == target) return true
+
         return when (this) {
-            QUEUED -> target == UPLOADING || target == CANCELLED
-            UPLOADING -> target in setOf(PAUSING, COMPLETED, CANCELLED, ERROR_RETRYABLE, ERROR_PERMANENT)
-            PAUSING -> target in setOf(PAUSED, CANCELLED, ERROR_RETRYABLE)
-            PAUSED -> target in setOf(RESUMING, CANCELLED)
-            RESUMING -> target in setOf(UPLOADING, ERROR_RETRYABLE, CANCELLED)
-            COMPLETED, CANCELLED, ERROR_PERMANENT -> false // Terminal states
-            ERROR_RETRYABLE -> target in setOf(QUEUED, CANCELLED) // Can retry from queued
+            NONE -> target in setOf(UPLOADING, CANCELLED)
+            UPLOADING -> target in setOf(PAUSED, COMPLETED, CANCELLED, ERROR)
+            PAUSED -> target in setOf(UPLOADING, CANCELLED)  // Browser POSTs -> UPLOADING
+            COMPLETED, CANCELLED, ERROR -> false  // Terminal states
         }
     }
 }
 
 /**
  * Immutable upload metadata.
- * URI is the source of truth - filename is display only.
  */
 data class UploadMetadata(
     val uploadId: String,
-    val fileUri: String,        // SAF URI - source of truth
-    val displayName: String,    // Human-readable filename
-    val path: String,           // Virtual path in AirBridge
+    val fileUri: String,
+    val displayName: String,
+    val path: String,
     val totalBytes: Long,
     val mimeType: String? = null
 )
 
 /**
  * Current state of an upload including progress.
- * All timestamps use elapsedRealtime for monotonic guarantees.
  */
 data class UploadStatus(
     val metadata: UploadMetadata,
     val state: UploadState,
     val bytesReceived: Long = 0,
     val bytesPerSecond: Float = 0f,
-    val startedAt: Long = 0,    // SystemClock.elapsedRealtime()
-    val updatedAt: Long = 0,    // SystemClock.elapsedRealtime()
-    val errorMessage: String? = null,
-    val retryCount: Int = 0
+    val startedAt: Long = 0,
+    val updatedAt: Long = 0,
+    val errorMessage: String? = null
 ) {
     val isTerminal: Boolean
-        get() = state in setOf(UploadState.COMPLETED, UploadState.CANCELLED, UploadState.ERROR_PERMANENT)
-    
+        get() = state in setOf(UploadState.COMPLETED, UploadState.CANCELLED, UploadState.ERROR)
+
     val remainingBytes: Long
         get() = (metadata.totalBytes - bytesReceived).coerceAtLeast(0)
-    
-    val estimatedSecondsRemaining: Long
-        get() = if (bytesPerSecond > 0) (remainingBytes / bytesPerSecond).toLong() else -1
-    
+
     val progressPercent: Int
         get() = if (metadata.totalBytes > 0) {
             ((bytesReceived * 100) / metadata.totalBytes).toInt()
         } else 0
+
+    val estimatedSecondsRemaining: Long
+        get() = if (bytesPerSecond > 0) (remainingBytes / bytesPerSecond).toLong() else -1
 }
 
 /**
@@ -79,7 +73,7 @@ data class UploadRequest(
     val fileUri: String,
     val fileName: String,
     val path: String,
-    val offset: Long,           // Resume position (must match disk size)
+    val offset: Long,  // MUST equal disk size (idempotent)
     val totalBytes: Long,
     val contentRange: String? = null
 )
@@ -93,74 +87,50 @@ sealed class UploadResult {
         val bytesReceived: Long,
         val fileId: String
     ) : UploadResult()
-    
+
     data class Paused(
         val uploadId: String,
         val bytesReceived: Long
     ) : UploadResult()
-    
+
     data class Cancelled(val uploadId: String) : UploadResult()
-    
-    /**
-     * Indicates upload is temporarily busy (file locked by previous upload finishing).
-     * Browser should retry in 300ms.
-     */
-    data class Busy(val uploadId: String) : UploadResult()
-    
+
     sealed class Failure : UploadResult() {
         abstract val uploadId: String
         abstract val bytesReceived: Long
-        
+
         data class OffsetMismatch(
             override val uploadId: String,
             override val bytesReceived: Long,
             val expectedOffset: Long,
             val actualDiskSize: Long
         ) : Failure()
-        
-        data class PermissionRevoked(
+
+        data class PermissionError(
             override val uploadId: String,
             override val bytesReceived: Long
         ) : Failure()
-        
+
         data class StorageFull(
             override val uploadId: String,
             override val bytesReceived: Long
         ) : Failure()
-        
+
         data class FileDeleted(
             override val uploadId: String,
             override val bytesReceived: Long
         ) : Failure()
-        
-        data class NetworkError(
-            override val uploadId: String,
-            override val bytesReceived: Long,
-            val cause: Throwable
-        ) : Failure()
-        
+
         data class UnknownError(
             override val uploadId: String,
             override val bytesReceived: Long,
             val cause: Throwable
         ) : Failure()
-        
-        val isRetryable: Boolean
-            get() = this is NetworkError || this is StorageFull
     }
 }
 
 /**
- * Exception types for upload failures.
+ * Exception types for upload flow control.
  */
-class OffsetMismatchException(val expectedOffset: Long, val actualOffset: Long) : Exception(
-    "Offset mismatch: expected $expectedOffset, disk has $actualOffset"
-)
-
-class PermissionRevokedException : Exception("SAF permission revoked during upload")
-
 class UploadPausedException : Exception("Upload paused by user")
-
 class UploadCancelledException : Exception("Upload cancelled by user")
-
-class UploadTimeoutException : Exception("Upload stalled - no progress detected")

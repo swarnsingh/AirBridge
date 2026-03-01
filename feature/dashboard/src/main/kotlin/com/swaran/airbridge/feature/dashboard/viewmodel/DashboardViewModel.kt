@@ -6,10 +6,12 @@ import com.swaran.airbridge.core.common.ResultState
 import com.swaran.airbridge.core.common.logging.AirLogger
 import com.swaran.airbridge.core.mvi.MviViewModel
 import com.swaran.airbridge.core.network.PushManager
-import com.swaran.airbridge.core.network.upload.UploadScheduler
+import com.swaran.airbridge.core.network.upload.UploadQueueManager
 import com.swaran.airbridge.core.service.ServerPreferences
+import com.swaran.airbridge.core.service.mdns.AirBridgeMdnsService
 import com.swaran.airbridge.domain.model.ServerStatus
 import com.swaran.airbridge.domain.model.TransferStatus
+import com.swaran.airbridge.domain.model.UploadRequest
 import com.swaran.airbridge.domain.model.UploadStatus
 import com.swaran.airbridge.domain.repository.StorageAccessManager
 import com.swaran.airbridge.domain.usecase.GenerateQrCodeUseCase
@@ -44,8 +46,9 @@ class DashboardViewModel @Inject constructor(
     private val generateQrCodeUseCase: GenerateQrCodeUseCase,
     private val storageAccessManager: StorageAccessManager,
     private val pushManager: PushManager,
-    private val uploadScheduler: UploadScheduler,
+    private val uploadQueueManager: UploadQueueManager,
     private val serverPreferences: ServerPreferences,
+    private val mdnsService: AirBridgeMdnsService,
     private val logger: AirLogger
 ) : MviViewModel<DashboardIntent, DashboardState, DashboardEffect>(DashboardState()) {
 
@@ -83,7 +86,7 @@ class DashboardViewModel @Inject constructor(
         loadServerAddress()
 
         // Collect active uploads from UploadScheduler
-        uploadScheduler.activeUploads
+        uploadQueueManager.scheduler.activeUploads
             .onEach { uploads ->
                 // Show ALL uploads including completed (don't filter isTerminal)
                 val uploadProgressList = uploads.values
@@ -117,74 +120,83 @@ class DashboardViewModel @Inject constructor(
             is DashboardIntent.PauseUpload -> {
                 logger.d(TAG, "handleIntent", "Pause upload: ${intent.uploadId}")
                 if (isOnCooldown(intent.uploadId)) return
-                uploadScheduler.pauseUpload(intent.uploadId)
+                uploadQueueManager.pause(intent.uploadId)
             }
             is DashboardIntent.ResumeUpload -> {
                 logger.d(TAG, "handleIntent", "Resume upload: ${intent.uploadId}")
                 if (isOnCooldown(intent.uploadId)) return
-                uploadScheduler.resumeUpload(intent.uploadId)
+                // Transition state so browser will detect and re-POST
+                uploadQueueManager.resume(intent.uploadId)
             }
             is DashboardIntent.CancelUpload -> {
                 logger.d(TAG, "handleIntent", "Cancel upload: ${intent.uploadId}")
-                uploadScheduler.cancelUpload(intent.uploadId)
+                val status = uploadQueueManager.scheduler.getStatus(intent.uploadId)
+                if (status != null) {
+                    val request = UploadRequest(
+                        uploadId = intent.uploadId,
+                        fileUri = status.metadata.fileUri,
+                        fileName = status.metadata.displayName,
+                        path = status.metadata.path,
+                        offset = 0,
+                        totalBytes = 0
+                    )
+                    viewModelScope.launch {
+                        uploadQueueManager.cancel(intent.uploadId, request)
+                    }
+                }
+            }
+            is DashboardIntent.NavigateToFileBrowser -> {
+                // Navigation handled via Effect in Route
+            }
+            is DashboardIntent.ScanQrCode -> {
+                // QR scanning handled in Route (camera permission + navigation)
             }
         }
     }
 
     private suspend fun handleStartServer() {
         logger.d(TAG, "handleStartServer", "Starting server...")
-        updateState { copy(isLoading = true) }
 
         val port = serverPreferences.getLastPort()
-        startServerUseCase(StartServerUseCase.Params(port = port))
-            .onEach { result ->
-                when (result) {
-                    is ResultState.Loading -> updateState { copy(isLoading = true) }
-                    is ResultState.Success -> {
-                        logger.i(TAG, "handleStartServer", "Server started on ${result.data.serverAddress}:${result.data.serverPort}")
-                        updateState {
-                            copy(
-                                isLoading = false,
-                                serverStatus = ServerStatus.Running(
-                                    address = result.data.serverAddress,
-                                    port = result.data.serverPort,
-                                    sessionToken = result.data.token
-                                )
-                            )
-                        }
-                        loadServerAddress()
-                    }
-                    is ResultState.Error -> {
-                        logger.e(TAG, "handleStartServer", result.throwable, "Failed to start server")
-                        updateState { copy(isLoading = false, errorMessage = result.throwable.message) }
-                        sendEffect(DashboardEffect.ShowError(result.throwable.message ?: "Failed to start server"))
-                    }
-                }
+        handleResultState(
+            flow = startServerUseCase(StartServerUseCase.Params(port = port)),
+            loadingState = state.value.copy(isLoading = true),
+            onSuccess = { result ->
+                logger.i(TAG, "handleStartServer", "Server started on ${result.serverAddress}:${result.serverPort}")
+                loadServerAddress()
+                state.value.copy(
+                    isLoading = false,
+                    serverStatus = ServerStatus.Running(
+                        address = result.serverAddress,
+                        port = result.serverPort,
+                        sessionToken = result.token
+                    )
+                ) to null
+            },
+            onError = { error ->
+                logger.e(TAG, "handleStartServer", error, "Failed to start server")
+                state.value.copy(isLoading = false, errorMessage = error.message) to
+                    DashboardEffect.ShowError(error.message ?: "Failed to start server")
             }
-            .launchIn(viewModelScope)
+        )
     }
 
     private suspend fun handleStopServer() {
-        stopServerUseCase(Unit)
-            .onEach { result ->
-                when (result) {
-                    is ResultState.Success -> {
-                        updateState {
-                            copy(
-                                isLoading = false,
-                                serverStatus = ServerStatus.Stopped,
-                                serverAddress = null,
-                                qrCodeUrl = null
-                            )
-                        }
-                    }
-                    is ResultState.Error -> {
-                        sendEffect(DashboardEffect.ShowError(result.throwable.message ?: "Failed to stop server"))
-                    }
-                    else -> {}
-                }
+        handleResultState(
+            flow = stopServerUseCase(Unit),
+            loadingState = state.value.copy(isLoading = true),
+            onSuccess = {
+                state.value.copy(
+                    isLoading = false,
+                    serverStatus = ServerStatus.Stopped,
+                    serverAddress = null,
+                    qrCodeUrl = null
+                ) to null
+            },
+            onError = { error ->
+                state.value to DashboardEffect.ShowError(error.message ?: "Failed to stop server")
             }
-            .launchIn(viewModelScope)
+        )
     }
 
     private fun loadServerAddress() {
@@ -192,7 +204,8 @@ class DashboardViewModel @Inject constructor(
             getServerAddressUseCase(Unit)
                 .onEach { result ->
                     if (result is ResultState.Success) {
-                        updateState { copy(serverAddress = result.data) }
+                        val mdnsHostname = mdnsService.getMdnsHostname()
+                        updateState { copy(serverAddress = result.data, mdnsHostname = mdnsHostname) }
                     }
                 }
                 .launchIn(viewModelScope)
@@ -200,20 +213,18 @@ class DashboardViewModel @Inject constructor(
     }
 
     private suspend fun handleGenerateQrCode() {
-        generateQrCodeUseCase(Unit)
-            .onEach { result ->
-                when (result) {
-                    is ResultState.Success -> {
-                        updateState { copy(qrCodeUrl = result.data) }
-                        sendEffect(DashboardEffect.ShowQrCode(result.data))
-                    }
-                    is ResultState.Error -> {
-                        sendEffect(DashboardEffect.ShowError(result.throwable.message ?: "Failed to generate QR code"))
-                    }
-                    else -> {}
-                }
+        handleResultState(
+            flow = generateQrCodeUseCase(Unit),
+            loadingState = state.value.copy(isLoading = true),
+            onSuccess = { result ->
+                state.value.copy(qrCodeUrl = result, isLoading = false) to
+                    DashboardEffect.ShowQrCode(result)
+            },
+            onError = { error ->
+                state.value.copy(isLoading = false) to
+                    DashboardEffect.ShowError(error.message ?: "Failed to generate QR code")
             }
-            .launchIn(viewModelScope)
+        )
     }
 
     /**
@@ -227,14 +238,11 @@ class DashboardViewModel @Inject constructor(
         } else 0
 
         val mappedStatus = when (state) {
-            com.swaran.airbridge.domain.model.UploadState.UPLOADING,
-            com.swaran.airbridge.domain.model.UploadState.RESUMING -> TransferStatus.UPLOADING.value
-            com.swaran.airbridge.domain.model.UploadState.PAUSING,
+            com.swaran.airbridge.domain.model.UploadState.UPLOADING -> TransferStatus.UPLOADING.value
             com.swaran.airbridge.domain.model.UploadState.PAUSED -> TransferStatus.PAUSED.value
             com.swaran.airbridge.domain.model.UploadState.COMPLETED -> TransferStatus.COMPLETED.value
             com.swaran.airbridge.domain.model.UploadState.CANCELLED -> TransferStatus.CANCELLED.value
-            com.swaran.airbridge.domain.model.UploadState.ERROR_RETRYABLE,
-            com.swaran.airbridge.domain.model.UploadState.ERROR_PERMANENT -> TransferStatus.ERROR.value
+            com.swaran.airbridge.domain.model.UploadState.ERROR -> TransferStatus.ERROR.value
             else -> TransferStatus.UPLOADING.value
         }
         
