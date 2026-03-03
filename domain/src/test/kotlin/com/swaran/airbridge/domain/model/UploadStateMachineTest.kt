@@ -74,10 +74,10 @@ class UploadStateMachineTest {
     }
 
     @Test
-    fun `paused can transition to resuming or cancelled`() {
+    fun `paused can transition to resuming, uploading, or cancelled`() {
         assertTrue(UploadState.PAUSED.canTransitionTo(UploadState.RESUMING))
         assertTrue(UploadState.PAUSED.canTransitionTo(UploadState.CANCELLED))
-        assertFalse(UploadState.PAUSED.canTransitionTo(UploadState.UPLOADING))
+        assertTrue(UploadState.PAUSED.canTransitionTo(UploadState.UPLOADING)) // Late POST resume
         assertFalse(UploadState.PAUSED.canTransitionTo(UploadState.PAUSING))
         assertFalse(UploadState.PAUSED.canTransitionTo(UploadState.COMPLETED))
     }

@@ -15,14 +15,45 @@ import com.swaran.airbridge.domain.usecase.UploadStateManager
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicReference
 import javax.inject.Inject
 import javax.inject.Singleton
+
+/**
+ * Encapsulates all coordination state for a single upload.
+ *
+ * Single ownership per upload eliminates cross-map coordination:
+ * - Lock (Mutex) for file-level single writer
+ * - Job reference for cancellation
+ * - Centralized lifecycle management
+ */
+private data class UploadSession(
+    val uploadId: String,
+    val lock: Mutex = Mutex(),
+    val jobRef: AtomicReference<Job?> = AtomicReference(null)
+) {
+    fun setJob(job: Job) {
+        jobRef.set(job)
+    }
+
+    fun cancel() {
+        jobRef.getAndSet(null)?.cancel()
+    }
+
+    fun clearJob() {
+        jobRef.set(null)
+    }
+
+    fun hasActiveJob(): Boolean {
+        return jobRef.get()?.isActive == true
+    }
+}
 
 /**
  * AirBridge Upload Scheduler - Protocol v2.1 (Deterministic Fail-Fast)
@@ -104,15 +135,18 @@ class UploadScheduler @Inject constructor(
     companion object {
         private const val TAG = "UploadScheduler"
         private const val MAX_CONCURRENT_UPLOADS = 3
-        private const val RESUME_DEADLINE_MS = 5000L  // 5s window for browser to POST
     }
 
-    private val fileLocks = ConcurrentHashMap<String, Mutex>()
-    private val activeJobs = ConcurrentHashMap<String, Job>()
+    private val sessions = ConcurrentHashMap<String, UploadSession>()
     private val uploadSemaphore = Semaphore(MAX_CONCURRENT_UPLOADS)
-    private val resumeDeadlines = ConcurrentHashMap<String, Long>()
 
     val activeUploads: StateFlow<Map<String, UploadStatus>> = stateManager.activeUploads
+
+    private fun getSession(uploadId: String): UploadSession {
+        return sessions.getOrPut(uploadId) {
+            UploadSession(uploadId)
+        }
+    }
 
     /**
      * Handle upload POST. Idempotent - same uploadId + offset is safe to retry.
@@ -131,51 +165,32 @@ class UploadScheduler @Inject constructor(
         receiveStream: suspend () -> java.io.InputStream
     ): UploadResult {
         val uploadId = request.uploadId
-        val lockKey = "${request.path}/${request.fileName}"
+        val session = getSession(uploadId)
 
-        logger.d(TAG, "handleUpload", "[$uploadId] Incoming POST offset=${request.offset}")
-
-        // 1️⃣ Check state before any work
-        val currentStatus = stateManager.getStatus(uploadId)
-        when (currentStatus?.state) {
-            UploadState.CANCELLED -> return UploadResult.Cancelled(uploadId)
-            UploadState.PAUSED -> {
-                logger.d(TAG, "handleUpload", "[$uploadId] Upload is paused, rejecting POST")
-                return UploadResult.Paused(uploadId, currentStatus.bytesReceived)
-            }
-            else -> {} // Continue with upload
-        }
-
-        // 2️⃣ FAIL-FAST: Try file mutex immediately (no blocking)
-        val fileMutex = fileLocks.getOrPut(lockKey) { Mutex() }
-        if (!fileMutex.tryLock()) {
-            logger.d(TAG, "handleUpload", "[$uploadId] File busy (locked by another upload)")
-            return UploadResult.Busy(uploadId, retryAfterMs = 200)
-        }
-
-        // 3️⃣ FAIL-FAST: Try semaphore (no blocking)
-        if (!uploadSemaphore.tryAcquire()) {
-            fileMutex.unlock()
-            logger.d(TAG, "handleUpload", "[$uploadId] Concurrency limit reached")
-            return UploadResult.Busy(uploadId, retryAfterMs = 300)
-        }
-
-        // 4️⃣ Register job for instant pause
-        val currentJob = currentCoroutineContext()[Job]
-        if (currentJob != null) {
-            activeJobs[uploadId] = currentJob
-        }
+        // IMPORTANT: Always acquire semaphore before file mutex.
+        // Never reverse ordering to avoid deadlock.
+        uploadSemaphore.acquire()
 
         try {
-            // Clear any resume deadline since browser has now POSTed
-            resumeDeadlines.remove(uploadId)
+            session.lock.withLock {
+                val currentJob = currentCoroutineContext()[Job]
+                currentJob?.let { session.setJob(it) }
 
-            return performUpload(request, receiveStream)
+                try {
+                    return performUpload(request, receiveStream)
+                } finally {
+                    session.clearJob()
+                }
+            }
         } finally {
-            activeJobs.remove(uploadId)
             uploadSemaphore.release()
-            fileMutex.unlock()
-            cleanupLock(lockKey)
+            // Clean up session if upload is terminal
+            val status = stateManager.getStatus(uploadId)
+            if (status?.state == UploadState.COMPLETED || 
+                status?.state == UploadState.CANCELLED ||
+                status?.state == UploadState.ERROR) {
+                sessions.remove(uploadId)
+            }
         }
     }
 
@@ -249,9 +264,11 @@ class UploadScheduler @Inject constructor(
 
             if (result.isSuccess) {
                 stateManager.transition(uploadId, UploadState.COMPLETED)
+                sessions.remove(uploadId) // Terminal state - clean up session
                 UploadResult.Success(uploadId, bytesReceived, result.getOrNull()?.id ?: "")
             } else {
                 stateManager.transition(uploadId, UploadState.ERROR, result.exceptionOrNull()?.message)
+                sessions.remove(uploadId) // Terminal state - clean up session
                 UploadResult.Failure.UnknownError(uploadId, bytesReceived, result.exceptionOrNull() ?: Exception("Unknown"))
             }
 
@@ -262,11 +279,13 @@ class UploadScheduler @Inject constructor(
         } catch (e: UploadCancelledException) {
             stateManager.transition(uploadId, UploadState.CANCELLED)
             cleanupPartial(request)
+            sessions.remove(uploadId) // Terminal state - clean up session
             UploadResult.Cancelled(uploadId)
 
         } catch (e: FileDeletedExternallyException) {
             logger.w(TAG, "performUpload", "[$uploadId] File deleted externally, returning error")
             stateManager.transition(uploadId, UploadState.ERROR, "File deleted externally")
+            sessions.remove(uploadId) // Terminal state - clean up session
             UploadResult.Failure.FileDeleted(uploadId, bytesReceived)
 
         } catch (e: kotlinx.coroutines.CancellationException) {
@@ -278,30 +297,46 @@ class UploadScheduler @Inject constructor(
             } else {
                 stateManager.transition(uploadId, UploadState.CANCELLED)
                 cleanupPartial(request)
+                sessions.remove(uploadId) // Terminal state - clean up session
                 UploadResult.Cancelled(uploadId)
             }
 
         } catch (e: Exception) {
             logger.e(TAG, "performUpload", "[$uploadId] Failed: ${e.message}", e)
             stateManager.transition(uploadId, UploadState.ERROR, e.message)
+            sessions.remove(uploadId) // Terminal state - clean up session
             UploadResult.Failure.UnknownError(uploadId, bytesReceived, e)
         }
     }
 
     /**
-     * Pause upload. Sets state to PAUSING (transitional), then cancels job.
-     * Scheduler catches exception and finalizes to PAUSED.
+     * Pause upload. Sets state to PAUSING (transitional), cancels and clears job via session.
+     * Clearing job early ensures resume POST doesn't wait behind lock cleanup.
      */
-    fun pause(uploadId: String) {
-        logger.d(TAG, "pause", "[$uploadId] Requested")
-        // Signal PAUSING state - upload loop will detect and throw
-        stateManager.transition(uploadId, UploadState.PAUSING)
-        activeJobs[uploadId]?.cancel()
+    fun pauseUpload(uploadId: String): Boolean {
+        // Always transition state first - session may not exist if upload hasn't started
+        val transitioned = stateManager.transition(uploadId, UploadState.PAUSING)
+        if (!transitioned) return false
+
+        // Cancel/clear job if session exists
+        sessions[uploadId]?.let { session ->
+            session.cancel()
+            session.clearJob() // Clear early so resume sees no active job
+        }
+        return true
     }
 
     /**
-     * Resume upload. Sets state to RESUMING with deadline.
-     * Browser MUST POST within RESUME_DEADLINE_MS or server reverts to PAUSED.
+     * Legacy pause method - delegates to pauseUpload
+     */
+    fun pause(uploadId: String) {
+        pauseUpload(uploadId)
+    }
+
+    /**
+     * Resume upload. Sets state to RESUMING.
+     * Browser POST will transition to UPLOADING when received.
+     * No deadline - POST is the authority.
      */
     fun resume(uploadId: String) {
         val status = stateManager.getStatus(uploadId)
@@ -312,31 +347,10 @@ class UploadScheduler @Inject constructor(
             return
         }
 
-        // Set RESUMING state and deadline
-        val deadline = System.currentTimeMillis() + RESUME_DEADLINE_MS
-        resumeDeadlines[uploadId] = deadline
+        // Set RESUMING state - browser POST will drive transition to UPLOADING
         stateManager.transition(uploadId, UploadState.RESUMING)
 
-        logger.d(TAG, "resume", "[$uploadId] Set RESUMING, deadline in ${RESUME_DEADLINE_MS}ms")
-
-        // Start deadline watcher - runs independently of streaming job
-        // The browser must POST within RESUME_DEADLINE_MS or we revert to PAUSED
-        applicationScope.launch {
-            delay(RESUME_DEADLINE_MS)
-            checkResumeDeadline(uploadId)
-        }
-    }
-
-    private fun checkResumeDeadline(uploadId: String) {
-        val deadline = resumeDeadlines[uploadId] ?: return
-        if (System.currentTimeMillis() >= deadline) {
-            val status = stateManager.getStatus(uploadId)
-            if (status?.state == UploadState.RESUMING) {
-                logger.w(TAG, "checkResumeDeadline", "[$uploadId] Deadline expired, reverting to PAUSED")
-                stateManager.transition(uploadId, UploadState.PAUSED)
-                resumeDeadlines.remove(uploadId)
-            }
-        }
+        logger.d(TAG, "resume", "[$uploadId] Set RESUMING, awaiting browser POST")
     }
 
     /**
@@ -352,22 +366,23 @@ class UploadScheduler @Inject constructor(
     suspend fun cancel(uploadId: String, request: UploadRequest) {
         logger.d(TAG, "cancel", "[$uploadId] Requested")
         
-        // 1. Cancel active job first (signals upload to stop)
-        val job = activeJobs[uploadId]
-        if (job != null) {
-            logger.d(TAG, "cancel", "[$uploadId] Cancelling active job")
-            job.cancel()
-            job.join() // Wait for job to complete cancellation
+        // 1. Cancel via session (signals upload to stop)
+        val session = sessions[uploadId]
+        if (session != null) {
+            logger.d(TAG, "cancel", "[$uploadId] Cancelling via session")
+            session.cancel()
+            // Wait for the job to complete cancellation
+            session.jobRef.get()?.join()
         }
         
-        // 2. Remove deadline if present
-        resumeDeadlines.remove(uploadId)
-        
-        // 3. Clean up partial file
+        // 2. Clean up partial file
         cleanupPartial(request)
         
-        // 4. Mark as cancelled in state
+        // 3. Mark as cancelled in state
         stateManager.transition(uploadId, UploadState.CANCELLED)
+        
+        // 4. Remove session
+        sessions.remove(uploadId)
     }
 
     private suspend fun cleanupPartial(request: UploadRequest) {
@@ -389,13 +404,6 @@ class UploadScheduler @Inject constructor(
         } ?: logger.w(TAG, "cleanupPartial", "File not found: $cleanPath/$fileName")
     }
 
-    private fun cleanupLock(lockKey: String) {
-        val mutex = fileLocks[lockKey]
-        if (mutex != null && !mutex.isLocked) {
-            fileLocks.remove(lockKey)
-        }
-    }
-
     /**
      * Query status. Disk size is source of truth.
      */
@@ -415,9 +423,8 @@ class UploadScheduler @Inject constructor(
             else -> if (diskSize > 0) UploadState.PAUSED.value else UploadState.NONE.value
         }
 
-        // Check if busy (file locked)
-        val lockKey = "$path/$fileName"
-        val isBusy = fileLocks[lockKey]?.isLocked == true
+        // Check if busy (any session holding lock for this file)
+        val isBusy = uploadId?.let { sessions[it]?.lock?.isLocked == true } ?: false
 
         return UploadQueryResult(
             exists = diskSize > 0,

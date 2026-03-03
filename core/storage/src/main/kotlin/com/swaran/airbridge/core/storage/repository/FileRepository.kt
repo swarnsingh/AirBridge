@@ -20,6 +20,8 @@ import com.swaran.airbridge.domain.repository.StorageAccessManager
 import com.swaran.airbridge.domain.repository.StorageRepository
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.yield
 import java.io.InputStream
 import java.io.OutputStream
@@ -501,7 +503,8 @@ class FileRepository @Inject constructor(
         var bytesRead: Int
 
         while (true) {
-            // Check cancellation before each read - throws CancellationException if cancelled
+            // REQUIRED: Cooperative cancellation for instant pause under heavy I/O
+            currentCoroutineContext().ensureActive()
             yield()
 
             bytesRead = read(buffer)
@@ -511,7 +514,8 @@ class FileRepository @Inject constructor(
             total += bytesRead
             onProgress(total)
 
-            // Check cancellation after each write for instant pause
+            // REQUIRED: Check cancellation after each write
+            currentCoroutineContext().ensureActive()
             yield()
         }
 

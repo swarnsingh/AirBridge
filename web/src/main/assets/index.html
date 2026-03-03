@@ -499,16 +499,29 @@
                     const status = await statusRes.json();
                     debugLog('UPLOAD', `${item.id} - Server status:`, status);
 
-                    // Sync local state with server
+                    // Sync local state with server - pause from phone handling
                     if (status.state && status.state !== item.state) {
                         debugLog('UPLOAD', `${item.id} - Syncing state from server: ${status.state}`);
-                        if (status.state === 'paused' || status.state === 'pausing') {
-                            item.state = status.state;
-                            item.isPaused = true;
-                            if (item.xhr) item.xhr.abort();
-                            uploadQueue.updateUI();
-                            return; // Stop the loop
+                        
+                        // PAUSED or INTERRUPTED from phone - abort XHR immediately, freeze progress
+                    if (status.state === 'paused' || status.state === 'pausing' || status.state === 'interrupted') {
+                        // CRITICAL: Abort XHR immediately to stop progress
+                        if (item.xhr) {
+                            item.xhr.abort();
+                            item.xhr = null;
                         }
+                        item.isPaused = true;
+                        item.state = 'paused';
+                        
+                        // Freeze progress at server-reported offset
+                        const serverPercent = (status.bytesReceived / item.fileSize) * 100;
+                        item.progress = Math.min(serverPercent, 99.9);
+                        item.offset = status.bytesReceived || 0;
+                        
+                        uploadQueue.updateUI();
+                        return; // Stop upload loop
+                    }
+                        
                         if (status.state === 'completed') {
                             item.state = 'completed';
                             item.updateProgress(item.fileSize);
@@ -604,8 +617,8 @@
                 const percentBase = (offset / item.fileSize) * 100;
 
                 xhr.upload.onprogress = (e) => {
-                    // STOP Progress UI instantly if paused
-                    if (item.isPaused || item.state === 'pausing' || item.state === 'paused') return;
+                    // STOP Progress UI instantly if paused or XHR nullified
+                    if (item.isPaused || !item.xhr) return;
 
                     if (e.lengthComputable) {
                         const chunkProgress = e.loaded / e.total;
