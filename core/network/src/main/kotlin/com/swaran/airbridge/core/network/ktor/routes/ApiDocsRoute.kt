@@ -1,5 +1,6 @@
 package com.swaran.airbridge.core.network.ktor.routes
 
+import com.swaran.airbridge.core.network.ktor.ResponseFields
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.call
@@ -177,7 +178,7 @@ fun Route.apiDocsRoute() {
                                 put("schema", buildJsonObject { put("type", "string") })
                             })
                             add(buildJsonObject {
-                                put("name", "uploadId")
+                                put("name", ResponseFields.UPLOAD_ID)
                                 put("in", "query")
                                 put("required", false)
                                 put("schema", buildJsonObject { put("type", "string") })
@@ -223,7 +224,7 @@ fun Route.apiDocsRoute() {
                                 put("schema", buildJsonObject { put("type", "string") })
                             })
                             add(buildJsonObject {
-                                put("name", "uploadId")
+                                put("name", ResponseFields.UPLOAD_ID)
                                 put("in", "query")
                                 put("required", false)
                                 put("schema", buildJsonObject { put("type", "string") })
@@ -286,7 +287,7 @@ fun Route.apiDocsRoute() {
                                 put("schema", buildJsonObject { put("type", "string") })
                             })
                             add(buildJsonObject {
-                                put("name", "uploadId")
+                                put("name", ResponseFields.UPLOAD_ID)
                                 put("in", "query")
                                 put("required", true)
                                 put("schema", buildJsonObject { put("type", "string") })
@@ -313,7 +314,7 @@ fun Route.apiDocsRoute() {
                                 put("schema", buildJsonObject { put("type", "string") })
                             })
                             add(buildJsonObject {
-                                put("name", "uploadId")
+                                put("name", ResponseFields.UPLOAD_ID)
                                 put("in", "query")
                                 put("required", false)
                                 put("schema", buildJsonObject { put("type", "string") })

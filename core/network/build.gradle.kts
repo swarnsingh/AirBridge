@@ -40,4 +40,11 @@ dependencies {
     implementation(libs.timber)
     implementation(libs.zxing.core)
     ksp(libs.hilt.ksp)
+    
+    // Test dependencies
+    testImplementation(libs.junit)
+    testImplementation(kotlin("test"))
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
+    testImplementation(libs.androidx.test.core)
+    testImplementation(libs.robolectric)
 }

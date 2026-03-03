@@ -1,7 +1,7 @@
 package com.swaran.airbridge.feature.filebrowser.viewmodel
 
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
-import com.swaran.airbridge.core.common.ResultState
 import com.swaran.airbridge.core.mvi.MviViewModel
 import com.swaran.airbridge.domain.model.FileItem
 import com.swaran.airbridge.domain.usecase.BrowseFilesUseCase
@@ -10,8 +10,6 @@ import com.swaran.airbridge.feature.filebrowser.mvi.FileBrowserIntent
 import com.swaran.airbridge.feature.filebrowser.mvi.FileBrowserState
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.collections.immutable.toImmutableList
-import kotlinx.coroutines.flow.launchIn
-import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -22,11 +20,19 @@ import javax.inject.Inject
  * navigating directories, and handling file selection.
  *
  * @property browseFilesUseCase Use case for browsing files in a directory
+ * @property savedStateHandle Handle for saving state across process death
  */
 @HiltViewModel
 class FileBrowserViewModel @Inject constructor(
-    private val browseFilesUseCase: BrowseFilesUseCase
-) : MviViewModel<FileBrowserIntent, FileBrowserState, FileBrowserEffect>(FileBrowserState()) {
+    private val browseFilesUseCase: BrowseFilesUseCase,
+    private val savedStateHandle: SavedStateHandle
+) : MviViewModel<FileBrowserIntent, FileBrowserState, FileBrowserEffect>(
+    FileBrowserState(currentPath = savedStateHandle[CURRENT_PATH_KEY] ?: "/")
+) {
+
+    companion object {
+        private const val CURRENT_PATH_KEY = "current_path"
+    }
 
     init {
         viewModelScope.launch { loadFiles() }
@@ -45,38 +51,35 @@ class FileBrowserViewModel @Inject constructor(
     private suspend fun loadFiles() {
         val currentPath = state.value.currentPath
 
-        browseFilesUseCase(BrowseFilesUseCase.Params(currentPath))
-            .onEach { result ->
-                when (result) {
-                    is ResultState.Loading -> updateState { copy(isLoading = true) }
-                    is ResultState.Success -> {
-                        updateState {
-                            copy(
-                                isLoading = false,
-                                files = result.data.toImmutableList()
-                            )
-                        }
-                    }
-                    is ResultState.Error -> {
-                        updateState { copy(isLoading = false) }
-                        sendEffect(FileBrowserEffect.ShowError(result.throwable.message ?: "Failed to load files"))
-                    }
-                }
+        handleResultState(
+            flow = browseFilesUseCase(BrowseFilesUseCase.Params(currentPath)),
+            loadingState = state.value.copy(isLoading = true),
+            onSuccess = { files: List<FileItem> ->
+                state.value.copy(
+                    isLoading = false,
+                    files = files.toImmutableList()
+                ) to null
+            },
+            onError = { throwable ->
+                state.value.copy(isLoading = false) to
+                    FileBrowserEffect.ShowError(throwable.message ?: "Failed to load files")
             }
-            .launchIn(viewModelScope)
+        )
     }
 
-    private fun navigateToFolder(path: String) {
+    private suspend fun navigateToFolder(path: String) {
         updateState { copy(currentPath = path) }
-        viewModelScope.launch { loadFiles() }
+        savedStateHandle[CURRENT_PATH_KEY] = path
+        loadFiles()
     }
 
-    private fun navigateUp() {
+    private suspend fun navigateUp() {
         val currentPath = state.value.currentPath
         if (currentPath != "/") {
             val parentPath = currentPath.substringBeforeLast('/').takeIf { it.isNotEmpty() } ?: "/"
             updateState { copy(currentPath = parentPath) }
-            viewModelScope.launch { loadFiles() }
+            savedStateHandle[CURRENT_PATH_KEY] = parentPath
+            loadFiles()
         }
     }
 

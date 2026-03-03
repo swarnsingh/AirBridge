@@ -30,7 +30,6 @@
         }
     </script>
     <style>
-        /* Custom scrollbar */
         ::-webkit-scrollbar { width: 8px; height: 8px; }
         ::-webkit-scrollbar-track { background: transparent; }
         ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
@@ -38,7 +37,6 @@
         .dark ::-webkit-scrollbar-thumb { background: #475569; }
         .dark ::-webkit-scrollbar-thumb:hover { background: #64748b; }
 
-        /* Drag and drop zone animations */
         .upload-zone {
             background-image: url("data:image/svg+xml,%3Csvg width='40' height='40' viewBox='0 0 40 40' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='%2394a3b8' fill-opacity='0.1' fill-rule='evenodd'%3E%3Cpath d='M0 40L40 0H20L0 20M40 40V20L20 40'/%3E%3C/g%3E%3C/svg%3E");
         }
@@ -48,7 +46,6 @@
             transform: scale(1.02);
         }
 
-        /* Progress bar animation */
         @keyframes shimmer {
             0% { background-position: -200% 0; }
             100% { background-position: 200% 0; }
@@ -62,7 +59,6 @@
             animation: shimmer 2s infinite;
         }
 
-        /* Toast notification */
         @keyframes slideIn {
             from { transform: translateX(100%); opacity: 0; }
             to { transform: translateX(0); opacity: 1; }
@@ -170,13 +166,21 @@
 
     <script>
         // ==========================================
+        // Debug Mode - Set window.DEBUG_UPLOAD = true in console
+        // ==========================================
+        const DEBUG_UPLOAD = window.DEBUG_UPLOAD || false;
+        function debugLog(area, message, data) {
+            if (!DEBUG_UPLOAD) return;
+            console.log(`[${area}] ${message}`, data || '');
+        }
+
+        // ==========================================
         // Theme Management
         // ==========================================
         const themeToggle = document.getElementById('themeToggle');
         const themeIcon = document.getElementById('themeIcon');
         const html = document.documentElement;
 
-        // Load saved theme
         const savedTheme = localStorage.getItem('airbridge-theme') || 'light';
         html.classList.toggle('dark', savedTheme === 'dark');
         updateThemeIcon(savedTheme === 'dark');
@@ -197,7 +201,6 @@
         const serverUrl = window.location.origin;
         let token = new URLSearchParams(window.location.search).get('token');
         let pairingId = null;
-        let activeUploads = {};
         let sseConnection = null;
 
         // ==========================================
@@ -213,12 +216,12 @@
         // Pairing Flow
         // ==========================================
         async function startPairing() {
-            console.log('[PAIRING] Requesting pairing session...');
+            debugLog('PAIRING', 'Requesting pairing session...');
             try {
                 const response = await fetch(`${serverUrl}/api/pair/request`, { method: 'POST' });
                 const data = await response.json();
                 pairingId = data.pairingId;
-                console.log(`[PAIRING] Got pairingId: ${pairingId}`);
+                debugLog('PAIRING', `Got pairingId: ${pairingId}`);
                 const pairingUrl = `airbridge://pair?id=${pairingId}&server=${encodeURIComponent(serverUrl)}`;
                 new QRCode(document.getElementById('qrcode'), { 
                     text: pairingUrl, 
@@ -230,7 +233,7 @@
                 });
                 checkPairingStatus();
             } catch (error) { 
-                console.error('[PAIRING] Failed:', error);
+                debugLog('PAIRING', 'Failed:', error);
                 showToast('Connection failed. Please refresh.', 'error');
             }
         }
@@ -261,56 +264,427 @@
         }
 
         // ==========================================
+        // DETERMINISTIC UPLOAD QUEUE MANAGER v2.1
         // ==========================================
-        // Upload Store (Single Source of Truth)
-        // ==========================================
-        class UploadStore {
-            constructor() {
-                this.uploads = new Map();
-                this.queueState = { isPaused: false, active: 0, queued: 0, paused: 0 };
-                this.listeners = [];
+        class UploadQueueManager {
+            constructor(maxParallel = 3) {
+                this.maxParallel = maxParallel;
+                this.active = 0;
+                this.queue = [];
+                this.items = new Map();
+                this.globalPaused = false;
             }
 
-            add(upload) {
-                this.uploads.set(upload.id, upload);
-                this.notify();
+            add(file, priority = 0) {
+                const item = new UploadItem(file, priority);
+                this.items.set(item.id, item);
+                this.queue.push(item);
+                debugLog('QUEUE', `Added ${item.id} (${file.name}), queue length: ${this.queue.length}`);
+                this.process();
+                return item;
             }
 
-            update(id, patch) {
-                const existing = this.uploads.get(id);
-                if (!existing) return;
-                Object.assign(existing, patch);
-                this.notify();
+            process() {
+                if (this.globalPaused) {
+                    debugLog('QUEUE', 'Global pause active, not processing');
+                    return;
+                }
+
+                while (this.active < this.maxParallel && this.queue.length > 0) {
+                    const next = this.dequeue();
+                    if (next) {
+                        this.start(next);
+                    }
+                }
+                
+                this.updateUI();
             }
 
-            remove(id) {
-                this.uploads.delete(id);
-                this.notify();
+            dequeue() {
+                // Sort by priority (higher = first)
+                this.queue.sort((a, b) => b.priority - a.priority);
+                const item = this.queue.shift();
+                debugLog('QUEUE', `Dequeued ${item?.id}, remaining: ${this.queue.length}`);
+                return item;
             }
 
-            updateQueueState(state) {
-                this.queueState = state;
-                this.notify();
+            start(item) {
+                this.active++;
+                item.state = 'uploading';
+                item.isPaused = false;
+                debugLog('QUEUE', `Starting ${item.id}, active: ${this.active}/${this.maxParallel}`);
+                
+                performUpload(item).finally(() => {
+                    this.active--;
+                    debugLog('QUEUE', `Completed ${item.id}, active: ${this.active}`);
+                    this.process();
+                });
             }
 
-            subscribe(listener) {
-                this.listeners.push(listener);
+            pause(id) {
+                const item = this.items.get(id);
+                if (!item) return;
+                
+                debugLog('QUEUE', `Pausing ${id}`);
+                item.state = 'paused';
+                item.isPaused = true;
+                
+                // Abort XHR immediately
+                if (item.xhr) {
+                    item.xhr.abort();
+                    item.xhr = null;
+                }
+                
+                // Remove from queue if still queued
+                const queueIndex = this.queue.findIndex(i => i.id === id);
+                if (queueIndex >= 0) {
+                    this.queue.splice(queueIndex, 1);
+                }
+                
+                this.updateUI();
             }
 
-            notify() {
-                const snapshot = Array.from(this.uploads.values());
-                this.listeners.forEach(l => l(snapshot, this.queueState));
+            resume(id) {
+                const item = this.items.get(id);
+                if (!item) return;
+
+                debugLog('QUEUE', `Resuming ${id} from state: ${item.state}`);
+                item.state = 'queued';
+                item.isPaused = false;
+
+                // Don't add to queue if already there
+                if (!this.queue.find(i => i.id === id)) {
+                    this.queue.push(item);
+                }
+                this.process();
             }
 
-            get(id) {
-                return this.uploads.get(id);
+            pauseAll() {
+                debugLog('QUEUE', 'Pausing all uploads');
+                this.globalPaused = true;
+                
+                // Pause all uploading items
+                this.items.forEach(item => {
+                    if (item.state === 'uploading' || item.state === 'queued') {
+                        this.pause(item.id);
+                    }
+                });
+                
+                this.updateUI();
+            }
+
+            resumeAll() {
+                debugLog('QUEUE', 'Resuming all uploads');
+                this.globalPaused = false;
+                
+                this.items.forEach(item => {
+                    if (item.state === 'paused' || item.state === 'pausing') {
+                        this.resume(item.id);
+                    }
+                });
+                
+                this.process();
+            }
+
+            cancel(id) {
+                const item = this.items.get(id);
+                if (!item) return;
+                
+                debugLog('QUEUE', `Cancelling ${id}`);
+                item.state = 'cancelled';
+                item.isPaused = true;
+
+                if (item.xhr) {
+                    item.xhr.abort();
+                    item.xhr = null;
+                }
+                
+                // Remove from queue if present
+                const queueIndex = this.queue.findIndex(i => i.id === id);
+                if (queueIndex >= 0) {
+                    this.queue.splice(queueIndex, 1);
+                }
+                
+                this.items.delete(id);
+                this.updateUI();
+            }
+
+            updateUI() {
+                const uploads = Array.from(this.items.values());
+                const state = {
+                    isPaused: this.globalPaused,
+                    active: uploads.filter(u => u.state === 'uploading').length,
+                    queued: this.queue.length,
+                    paused: uploads.filter(u => u.state === 'paused' || u.state === 'pausing').length
+                };
+                renderUploads(uploads, state);
+            }
+
+            getStats() {
+                return {
+                    active: this.active,
+                    queued: this.queue.length,
+                    total: this.items.size
+                };
             }
         }
 
-        const uploadStore = new UploadStore();
+        class UploadItem {
+            constructor(file, priority = 0) {
+                this.id = Date.now() + '_' + Math.random().toString(36).slice(2, 9);
+                this.file = file;
+                this.name = file.name;
+                this.fileSize = file.size;
+                this.priority = priority;
+                this.offset = 0;
+                this.state = 'queued';
+                this.isPaused = false;
+                this.xhr = null;
+                this.progress = 0;
+                this.speed = 0;
+                this.lastProgressTime = 0;
+                this.lastProgressBytes = 0;
+            }
+
+            updateProgress(bytesReceived) {
+                this.offset = bytesReceived;
+                this.progress = this.fileSize > 0 ? (bytesReceived / this.fileSize) * 100 : 0;
+                
+                // Calculate speed
+                const now = Date.now();
+                if (this.lastProgressTime > 0) {
+                    const dt = (now - this.lastProgressTime) / 1000;
+                    const db = bytesReceived - this.lastProgressBytes;
+                    if (dt > 0) {
+                        this.speed = db / dt;
+                    }
+                }
+                this.lastProgressTime = now;
+                this.lastProgressBytes = bytesReceived;
+            }
+        }
+
+        const uploadQueue = new UploadQueueManager(3);
 
         // ==========================================
-        // SSE (Server-Sent Events)
+        // DETERMINISTIC performUpload()
+        // Never waits for server. POSTs immediately. Retries on busy.
+        // ==========================================
+        async function performUpload(item) {
+            let backoff = 200;
+            let attempts = 0;
+            const maxAttempts = 20;
+
+            while (attempts < maxAttempts) {
+                attempts++;
+                
+                // Strict check for stopped states
+                if (item.state === 'paused' || item.state === 'pausing' || item.state === 'cancelled') {
+                    debugLog('UPLOAD', `${item.id} - Stopped (state: ${item.state})`);
+                    return;
+                }
+
+                try {
+                    // 1️⃣ Fetch authoritative offset from server
+                    debugLog('UPLOAD', `${item.id} - Fetching status (attempt ${attempts})`);
+                    const statusRes = await fetch(
+                        `${serverUrl}/api/upload/status?id=${item.id}&filename=${encodeURIComponent(item.name)}&token=${token}`,
+                        { signal: AbortSignal.timeout(10000) }
+                    );
+                    
+                    if (!statusRes.ok) {
+                        throw new Error(`HTTP ${statusRes.status}`);
+                    }
+                    
+                    const status = await statusRes.json();
+                    debugLog('UPLOAD', `${item.id} - Server status:`, status);
+
+                    // Sync local state with server
+                    if (status.state && status.state !== item.state) {
+                        debugLog('UPLOAD', `${item.id} - Syncing state from server: ${status.state}`);
+                        if (status.state === 'paused' || status.state === 'pausing') {
+                            item.state = status.state;
+                            item.isPaused = true;
+                            if (item.xhr) item.xhr.abort();
+                            uploadQueue.updateUI();
+                            return; // Stop the loop
+                        }
+                        if (status.state === 'completed') {
+                            item.state = 'completed';
+                            item.updateProgress(item.fileSize);
+                            uploadQueue.updateUI();
+                            return;
+                        }
+                    }
+
+                    // Re-check local state after async call
+                    if (item.state === 'paused' || item.state === 'pausing' || item.state === 'cancelled') return;
+
+                    // Server says busy - wait and retry
+                    if (status.status === 'busy' || status.isBusy) {
+                        debugLog('UPLOAD', `${item.id} - Server busy, backing off ${backoff}ms`);
+                        await sleep(backoff);
+                        backoff = Math.min(backoff * 2, 3000);
+                        continue;
+                    }
+
+                    // Handle offset mismatch - server tells us correct offset
+                    let serverOffset = status.bytesReceived || 0;
+                    item.updateProgress(serverOffset);
+                    uploadQueue.updateUI();
+
+                    // 2️⃣ Send chunk from offset (IMMEDIATE POST)
+                    const chunk = item.file.slice(serverOffset);
+                    const result = await sendChunk(item, serverOffset, chunk);
+
+                    if (result.success) {
+                        item.state = 'completed';
+                        item.updateProgress(item.fileSize);
+                        uploadQueue.updateUI();
+                        showToast(`${item.name} uploaded successfully`, 'success');
+                        loadFiles();
+                        return;
+                    }
+
+                    if (result.busy) {
+                        debugLog('UPLOAD', `${item.id} - Got 409 busy, retrying in ${backoff}ms`);
+                        await sleep(backoff);
+                        backoff = Math.min(backoff * 2, 3000);
+                        continue;
+                    }
+
+                    if (result.paused || result.aborted) {
+                        // If state was changed during XHR, stop the loop
+                        if (item.state === 'pausing' || item.state === 'paused' || item.isPaused) {
+                            debugLog('UPLOAD', `${item.id} - Stopped after XHR abort`);
+                            return;
+                        }
+                        // Otherwise, something went wrong, retry
+                        continue;
+                    }
+
+                    if (result.offsetMismatch) {
+                        debugLog('UPLOAD', `${item.id} - Offset mismatch detected, refreshing offset`);
+                        continue; // Loop back to fetch fresh status
+                    }
+
+                    // Network or other error
+                    throw new Error(result.error || 'Upload failed');
+
+                } catch (err) {
+                    debugLog('UPLOAD', `${item.id} - Error: ${err.message}`);
+                    
+                    if (item.state === 'paused' || item.state === 'pausing' || item.state === 'cancelled' || item.isPaused) {
+                        return;
+                    }
+                    
+                    // Exponential backoff on network errors
+                    await sleep(backoff);
+                    backoff = Math.min(backoff * 2, 3000);
+                }
+            }
+
+            // Max attempts reached
+            debugLog('UPLOAD', `${item.id} - Max attempts reached, failing`);
+            item.state = 'error';
+            uploadQueue.updateUI();
+        }
+
+        async function sendChunk(item, offset, chunk) {
+            return new Promise((resolve) => {
+                const xhr = new XMLHttpRequest();
+                item.xhr = xhr;
+
+                xhr.open('POST', `${serverUrl}/api/upload?token=${token}&filename=${encodeURIComponent(item.name)}&id=${item.id}`);
+
+                if (offset > 0) {
+                    xhr.setRequestHeader('Content-Range', `bytes ${offset}-${item.fileSize-1}/${item.fileSize}`);
+                }
+
+                const percentBase = (offset / item.fileSize) * 100;
+
+                xhr.upload.onprogress = (e) => {
+                    // STOP Progress UI instantly if paused
+                    if (item.isPaused || item.state === 'pausing' || item.state === 'paused') return;
+
+                    if (e.lengthComputable) {
+                        const chunkProgress = e.loaded / e.total;
+                        const totalProgress = percentBase + (chunkProgress * (100 - percentBase));
+                        item.progress = Math.min(totalProgress, 99.9);
+                        item.offset = offset + e.loaded;
+                        uploadQueue.updateUI();
+                    }
+                };
+
+                xhr.onload = () => {
+                    item.xhr = null;
+                    
+                    if (xhr.status === 200) {
+                        try {
+                            const resp = JSON.parse(xhr.responseText);
+                            if (resp.success || resp.state === 'completed') {
+                                resolve({ success: true });
+                            } else if (resp.state === 'paused' || resp.state === 'pausing') {
+                                resolve({ paused: true, bytesReceived: resp.bytesReceived });
+                            } else if (resp.state === 'cancelled') {
+                                resolve({ cancelled: true });
+                            } else {
+                                resolve({ error: resp.error || 'Unknown error' });
+                            }
+                        } catch (e) {
+                            resolve({ success: true }); // Assume success if parse fails but 200
+                        }
+                    } else if (xhr.status === 409) {
+                        // Server busy or offset mismatch
+                        try {
+                            const resp = JSON.parse(xhr.responseText);
+                            if (resp.status === 'offset_mismatch' || resp.error?.includes('offset')) {
+                                resolve({ offsetMismatch: true, diskSize: resp.diskSize });
+                            } else {
+                                resolve({ busy: true, retryAfterMs: resp.retryAfterMs });
+                            }
+                        } catch (e) {
+                            resolve({ busy: true });
+                        }
+                    } else if (xhr.status === 410) {
+                        // Could be cancelled or file deleted externally
+                        try {
+                            const resp = JSON.parse(xhr.responseText);
+                            if (resp.error === 'file_deleted') {
+                                debugLog('UPLOAD', `${item.id} - File deleted externally, restarting from 0`);
+                                item.offset = 0;
+                                item.updateProgress(0);
+                                resolve({ offsetMismatch: true, diskSize: 0 });
+                                return;
+                            }
+                        } catch (e) {}
+                        resolve({ cancelled: true });
+                    } else {
+                        resolve({ error: `HTTP ${xhr.status}` });
+                    }
+                };
+
+                xhr.onerror = () => {
+                    item.xhr = null;
+                    resolve({ error: 'Network error' });
+                };
+
+                xhr.onabort = () => {
+                    item.xhr = null;
+                    resolve({ aborted: true });
+                };
+
+                xhr.send(chunk);
+            });
+        }
+
+        function sleep(ms) {
+            return new Promise(r => setTimeout(r, ms));
+        }
+
+        // ==========================================
+        // SSE (Server-Sent Events) - Optimization only
+        // Never gating for resume. Browser POSTs immediately.
         // ==========================================
         function startServerSse() {
             if (sseConnection) sseConnection.close();
@@ -318,69 +692,74 @@
             const sseUrl = `${serverUrl}/api/upload/events?token=${token}`;
             sseConnection = new EventSource(sseUrl);
 
-            sseConnection.onopen = () => console.log('[SSE] Connected');
+            sseConnection.onopen = () => debugLog('SSE', 'Connected');
 
             sseConnection.onmessage = (event) => {
                 try {
                     const data = JSON.parse(event.data);
+                    debugLog('SSE', 'Received:', data);
 
                     if (data.type === 'queue') {
-                        // Update queue state
-                        uploadStore.updateQueueState({
-                            isPaused: data.isPaused,
-                            active: data.active,
-                            queued: data.queued,
-                            paused: data.paused
-                        });
+                        // Update global pause state
+                        if (data.isPaused && !uploadQueue.globalPaused) {
+                            uploadQueue.pauseAll();
+                        } else if (!data.isPaused && uploadQueue.globalPaused) {
+                            uploadQueue.resumeAll();
+                        }
                         return;
                     }
 
-                    if (data.type === 'upload') {
-                        const item = uploadStore.get(data.uploadId);
+                    if (data.type === 'upload' && data.uploadId) {
+                        const item = uploadQueue.items.get(data.uploadId);
                         if (!item) return;
 
-                        // Update bytes from server (disk is source of truth)
-                        if (data.bytesReceived > item.bytesReceived) {
-                            item.bytesReceived = data.bytesReceived;
-                        }
-
-                        // Handle state transitions from server
+                        // Handle server-side state changes
                         if (data.state === 'cancelled') {
-                            if (item.worker) item.worker.cancel();
                             item.state = 'cancelled';
-                            uploadStore.update(data.uploadId, { state: 'cancelled' });
-                            setTimeout(() => uploadStore.remove(data.uploadId), 1000);
-                        } else if (data.state === 'paused') {
-                            // Server says paused - abort XHR immediately and update state
-                            console.log(`[SSE] Server says paused for ${data.uploadId}, aborting XHR`);
-                            if (item.worker) item.worker.pause();
-                            item.state = 'paused';
                             item.isPaused = true;
-                            uploadStore.update(data.uploadId, { state: 'paused', isPaused: true });
-                        } else if (data.state === 'uploading') {
-                            // Server is actively uploading
-                            item.state = 'uploading';
-                            item.isPaused = false;
-                            uploadStore.update(data.uploadId, { state: 'uploading', isPaused: false });
+                            if (item.xhr) item.xhr.abort();
+                            uploadQueue.items.delete(data.uploadId);
+                            uploadQueue.updateUI();
+                        } else if (data.state === 'pausing' || data.state === 'paused') {
+                            // Server is pausing/paused - snap UI and abort
+                            debugLog('SSE', `${data.uploadId} - Server signaled ${data.state}, stopping local stream`);
+                            item.state = data.state;
+                            item.isPaused = true;
+                            if (item.xhr) item.xhr.abort();
+
+                            // Explicitly sync bytes
+                            if (data.bytesReceived !== undefined) {
+                                item.updateProgress(data.bytesReceived);
+                            }
+                            uploadQueue.updateUI();
+                        } else if (data.state === 'resuming') {
+                            // Server is ready for resume - browser should POST
+                            debugLog('SSE', `${data.uploadId} - Server resuming, triggering resume`);
+                            uploadQueue.resume(data.uploadId);
+                            item.state = 'resuming';
+                            uploadQueue.updateUI();
                         } else if (data.state === 'completed') {
-                            if (item.worker) item.worker.cancel();
                             item.state = 'completed';
                             item.progress = 100;
-                            uploadStore.update(data.uploadId, { state: 'completed', progress: 100 });
+                            if (item.xhr) item.xhr.abort();
+                            uploadQueue.updateUI();
                             showToast(`${item.name} uploaded successfully`, 'success');
-                            setTimeout(() => uploadStore.remove(data.uploadId), 2000);
-                        } else if (data.state === 'error') {
-                            item.state = 'error';
-                            uploadStore.update(data.uploadId, { state: 'error' });
+                            loadFiles();
+                        } else if (data.state === 'uploading') {
+                            // Only update progress if we are actually uploading
+                            if (!item.isPaused && item.state === 'uploading' && data.bytesReceived > item.offset) {
+                                item.updateProgress(data.bytesReceived);
+                                uploadQueue.updateUI();
+                            }
                         }
                     }
                 } catch (e) {
-                    console.error('[SSE] Parse error:', e);
+                    debugLog('SSE', 'Parse error:', e);
                 }
             };
 
             sseConnection.onerror = () => {
-                console.warn('[SSE] Error, reconnecting...');
+                debugLog('SSE', 'Error, reconnecting in 3s...');
                 setTimeout(startServerSse, 3000);
             };
         }
@@ -442,7 +821,7 @@
         }
 
         // ==========================================
-        // Upload Management with Queue Support
+        // Upload UI Handling
         // ==========================================
         const uploadZone = document.getElementById('uploadZone');
         const fileInput = document.getElementById('fileInput');
@@ -461,247 +840,121 @@
         uploadZone.ondrop = (e) => {
             e.preventDefault();
             uploadZone.classList.remove('drag-over');
-            uploadFiles(e.dataTransfer.files);
+            handleFiles(e.dataTransfer.files);
         };
 
-        fileInput.onchange = (e) => uploadFiles(e.target.files);
+        fileInput.onchange = (e) => handleFiles(e.target.files);
 
-        // Subscribe store to UI updates
-        uploadStore.subscribe((uploads, queueState) => {
-            renderUploads(uploads, queueState);
-        });
-
-        function uploadFiles(files) {
+        function handleFiles(files) {
             const uploadSection = document.getElementById('uploadSection');
             uploadSection.classList.remove('hidden');
 
             Array.from(files).forEach(file => {
-                const uploadId = Date.now() + '_' + Math.random().toString(36).substr(2, 9);
-
-                const upload = {
-                    id: uploadId,
-                    name: file.name,
-                    fileSize: file.size,
-                    file: file,
-                    bytesReceived: 0,
-                    progress: 0,
-                    state: 'queued',
-                    speed: 0,
-                    isPaused: false,
-                    worker: null
-                };
-
-                upload.worker = new UploadWorker(upload);
-                uploadStore.add(upload);
-
-                // Start immediately - queue manager will handle concurrency
-                upload.worker.start();
+                uploadQueue.add(file, 0);
             });
         }
 
-        class UploadWorker {
-            constructor(upload) {
-                this.upload = upload;
-                this.xhr = null;
-            }
-
-            async start() {
-                const { id, name, file, fileSize } = this.upload;
-                console.log(`[UploadWorker] start() called for ${id}, current state=${this.upload.state}`);
-
-                // Query server status
-                let serverOffset = 0;
-                let serverState = 'none';
-
-                try {
-                    const res = await fetch(`${serverUrl}/api/upload/status?id=${id}&filename=${encodeURIComponent(name)}&token=${token}`);
-                    const data = await res.json();
-                    serverOffset = data.bytesReceived || 0;
-                    serverState = data.state || 'none';
-                } catch (e) {
-                    serverOffset = this.upload.bytesReceived;
-                }
-
-                // Check terminal states
-                if (serverState === 'completed' || serverOffset >= fileSize) {
-                    uploadStore.update(id, { state: 'completed', progress: 100 });
-                    return;
-                }
-
-                if (serverState === 'cancelled') {
-                    uploadStore.update(id, { state: 'cancelled' });
-                    return;
-                }
-
-                if (serverState === 'error') {
-                    uploadStore.update(id, { state: 'error' });
-                    return;
-                }
-
-                // Update our offset
-                this.upload.bytesReceived = serverOffset;
-                uploadStore.update(id, { bytesReceived: serverOffset, progress: (serverOffset / fileSize) * 100 });
-
-                // Upload chunk
-                const chunk = file.slice(serverOffset);
-                const percentBase = (serverOffset / fileSize) * 100;
-
-                return new Promise((resolve, reject) => {
-                    this.xhr = new XMLHttpRequest();
-                    this.xhr.open('POST', `${serverUrl}/api/upload?token=${token}&filename=${encodeURIComponent(name)}&id=${id}`);
-
-                    if (serverOffset > 0) {
-                        this.xhr.setRequestHeader('Content-Range', `bytes ${serverOffset}-${fileSize-1}/${fileSize}`);
-                    }
-
-                    this.xhr.upload.onprogress = (e) => {
-                        // Freeze progress if not uploading (prevents drift during pause)
-                        if (this.upload.state !== 'uploading') return;
-                        if (e.lengthComputable) {
-                            const chunkProgress = e.loaded / e.total;
-                            const totalProgress = percentBase + (chunkProgress * (100 - percentBase));
-                            const progress = Math.min(totalProgress, 99.9);
-                            const bytesReceived = serverOffset + e.loaded;
-                            uploadStore.update(id, { progress, bytesReceived });
-                        }
-                    };
-
-                    this.xhr.onload = () => {
-                        const xhrRef = this.xhr;
-                        this.xhr = null;
-                        if (xhrRef.status >= 200 && xhrRef.status < 300) {
-                            try {
-                                const resp = JSON.parse(xhrRef.responseText);
-                                if (resp.success) {
-                                    uploadStore.update(id, { state: 'completed', progress: 100 });
-                                    resolve();
-                                } else if (resp.state === 'paused') {
-                                    uploadStore.update(id, { state: 'paused', isPaused: true });
-                                    resolve();
-                                } else {
-                                    uploadStore.update(id, { state: 'error' });
-                                    reject(new Error(resp.error || 'Upload failed'));
-                                }
-                            } catch (e) {
-                                reject(e);
-                            }
-                        } else {
-                            reject(new Error('HTTP ' + xhrRef.status));
-                        }
-                    };
-
-                    this.xhr.onerror = () => {
-                        this.xhr = null;
-                        uploadStore.update(id, { state: 'error' });
-                        reject(new Error('Network error'));
-                    };
-
-                    this.xhr.send(chunk);
-                });
-            }
-
-            pause() {
-                console.log('[UploadWorker] pause() called, xhr=', this.xhr ? 'exists' : 'null');
-                if (this.xhr) {
-                    this.xhr.abort();
-                    this.xhr = null;
-                }
-            }
-
-            cancel() {
-                if (this.xhr) {
-                    this.xhr.abort();
-                    this.xhr = null;
-                }
-            }
-        }
-
         async function pauseUpload(id) {
+            debugLog('UI', `Pause requested for ${id}`);
             await fetch(`${serverUrl}/api/upload/pause?token=${token}&id=${id}`, { method: 'POST' });
+            uploadQueue.pause(id);
         }
 
         async function resumeUpload(id) {
-            const item = uploadStore.get(id);
-            if (!item || !item.worker) {
-                console.log(`[resumeUpload] No item or worker for ${id}`);
-                return;
-            }
-
-            console.log(`[resumeUpload] Resuming ${id}`);
-            // Tell server we're ready to resume
+            debugLog('UI', `Resume requested for ${id}`);
             await fetch(`${serverUrl}/api/upload/resume?token=${token}&id=${id}`, { method: 'POST' });
-
-            // Start the upload worker immediately - server is now ready
-            item.isPaused = false;
-            item.worker.start();
+            uploadQueue.resume(id);
         }
 
         async function cancelUpload(id) {
+            debugLog('UI', `Cancel requested for ${id}`);
             await fetch(`${serverUrl}/api/upload/cancel?token=${token}&id=${id}`, { method: 'POST' });
+            uploadQueue.cancel(id);
+        }
+
+        async function pauseAll() {
+            debugLog('UI', 'Pause all requested');
+            await fetch(`${serverUrl}/api/upload/pauseAll?token=${token}`, { method: 'POST' });
+            uploadQueue.pauseAll();
+        }
+
+        async function resumeAll() {
+            debugLog('UI', 'Resume all requested');
+            await fetch(`${serverUrl}/api/upload/resumeAll?token=${token}`, { method: 'POST' });
+            uploadQueue.resumeAll();
         }
 
         function renderUploads(uploads, queueState) {
             const container = document.getElementById('uploadProgress');
             if (!container) return;
 
-            // Update queue stats header
             let headerHtml = '';
             if (uploads.length > 0) {
                 headerHtml = `
                     <div class="flex items-center justify-between mb-3 text-sm text-gray-600 dark:text-gray-400">
                         <span>${queueState.active} active • ${queueState.queued} queued • ${queueState.paused} paused</span>
                         ${queueState.isPaused ?
-                            '<button onclick="resumeAll()" class="text-brand-500 hover:text-brand-600">Resume All</button>' :
-                            '<button onclick="pauseAll()" class="text-brand-500 hover:text-brand-600">Pause All</button>'}
+                            '<button onclick="resumeAll()" class="text-brand-500 hover:text-brand-600 font-medium">Resume All</button>' :
+                            '<button onclick="pauseAll()" class="text-brand-500 hover:text-brand-600 font-medium">Pause All</button>'}
                     </div>
                 `;
             }
 
-            // Render upload items
             const itemsHtml = uploads.map(u => renderUploadItem(u)).join('');
-
             container.innerHTML = headerHtml + itemsHtml;
         }
 
         function renderUploadItem(upload) {
-            const { id, name, fileSize, progress, state, speed } = upload;
-            const percent = Math.round(progress);
-
+            const percent = Math.round(upload.progress);
             let statusText = '';
             let actionButtons = '';
 
-            switch (state) {
+            switch (upload.state) {
+                case 'none':
                 case 'queued':
                     statusText = 'Queued';
-                    actionButtons = `<button onclick="cancelUpload('${id}')" class="text-red-500 hover:text-red-600">Cancel</button>`;
+                    actionButtons = `<button onclick="cancelUpload('${upload.id}')" class="text-red-500 hover:text-red-600 text-sm">Cancel</button>`;
+                    break;
+                case 'resuming':
+                    statusText = 'Resuming...';
+                    actionButtons = `<button onclick="pauseUpload('${upload.id}')" class="text-yellow-500 hover:text-yellow-600 text-sm mr-2">Pause</button>
+                        <button onclick="cancelUpload('${upload.id}')" class="text-red-500 hover:text-red-600 text-sm">Cancel</button>`;
                     break;
                 case 'uploading':
-                    statusText = `Uploading ${formatSpeed(speed)}`;
+                    statusText = `Uploading ${formatSpeed(upload.speed)}`;
                     actionButtons = `
-                        <button onclick="pauseUpload('${id}')" class="text-yellow-500 hover:text-yellow-600 mr-2">Pause</button>
-                        <button onclick="cancelUpload('${id}')" class="text-red-500 hover:text-red-600">Cancel</button>
+                        <button onclick="pauseUpload('${upload.id}')" class="text-yellow-500 hover:text-yellow-600 text-sm mr-2">Pause</button>
+                        <button onclick="cancelUpload('${upload.id}')" class="text-red-500 hover:text-red-600 text-sm">Cancel</button>
                     `;
+                    break;
+                case 'pausing':
+                    statusText = 'Pausing...';
+                    actionButtons = `<button onclick="cancelUpload('${upload.id}')" class="text-red-500 hover:text-red-600 text-sm">Cancel</button>`;
                     break;
                 case 'paused':
                     statusText = 'Paused';
                     actionButtons = `
-                        <button onclick="resumeUpload('${id}')" class="text-green-500 hover:text-green-600 mr-2">Resume</button>
-                        <button onclick="cancelUpload('${id}')" class="text-red-500 hover:text-red-600">Cancel</button>
+                        <button onclick="resumeUpload('${upload.id}')" class="text-green-500 hover:text-green-600 text-sm mr-2">Resume</button>
+                        <button onclick="cancelUpload('${upload.id}')" class="text-red-500 hover:text-red-600 text-sm">Cancel</button>
                     `;
                     break;
                 case 'completed':
                     statusText = 'Completed';
                     actionButtons = '';
                     break;
+                case 'cancelled':
+                    statusText = 'Cancelled';
+                    actionButtons = '';
+                    break;
                 case 'error':
                     statusText = 'Error';
                     actionButtons = `
-                        <button onclick="uploadStore.get('${id}')?.worker?.start()" class="text-brand-500 hover:text-brand-600 mr-2">Retry</button>
-                        <button onclick="cancelUpload('${id}')" class="text-red-500 hover:text-red-600">Cancel</button>
+                        <button onclick="resumeUpload('${upload.id}')" class="text-brand-500 hover:text-brand-600 text-sm mr-2">Retry</button>
+                        <button onclick="cancelUpload('${upload.id}')" class="text-red-500 hover:text-red-600 text-sm">Cancel</button>
                     `;
                     break;
                 default:
-                    statusText = state;
+                    statusText = upload.state;
             }
 
             return `
@@ -709,8 +962,8 @@
                     <div class="flex items-center justify-between mb-2">
                         <div class="flex items-center gap-3 min-w-0">
                             <span class="text-xl">📄</span>
-                            <span class="font-medium text-gray-900 dark:text-white truncate">${escapeHtml(name)}</span>
-                            <span class="text-xs text-gray-500">${formatBytes(fileSize)}</span>
+                            <span class="font-medium text-gray-900 dark:text-white truncate">${escapeHtml(upload.name)}</span>
+                            <span class="text-xs text-gray-500">${formatBytes(upload.fileSize)}</span>
                         </div>
                         <div class="flex items-center gap-2 text-sm">
                             <span class="text-gray-600 dark:text-gray-300">${percent}%</span>
@@ -722,7 +975,7 @@
                     </div>
                     <div class="flex justify-between mt-1 text-xs text-gray-500 dark:text-gray-400">
                         <span>${statusText}</span>
-                        <span>${formatBytes(upload.bytesReceived)} / ${formatBytes(fileSize)}</span>
+                        <span>${formatBytes(upload.offset)} / ${formatBytes(upload.fileSize)}</span>
                     </div>
                 </div>
             `;
@@ -739,237 +992,6 @@
             if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + ' MB';
             if (bytes >= 1024) return (bytes / 1024).toFixed(1) + ' KB';
             return bytes + ' B';
-        }
-
-        async function pauseAll() {
-            const uploads = Array.from(uploadStore.uploads.values());
-            const active = uploads.filter(u => u.state === 'uploading');
-            for (const u of active) {
-                await pauseUpload(u.id);
-            }
-        }
-
-        async function resumeAll() {
-            const uploads = Array.from(uploadStore.uploads.values());
-            const paused = uploads.filter(u => u.state === 'paused');
-            for (const u of paused) {
-                // Tell server and immediately start each upload
-                await fetch(`${serverUrl}/api/upload/resume?token=${token}&id=${u.id}`, { method: 'POST' });
-                u.isPaused = false;
-                u.worker.start();
-            }
-        }
-
-        function createProgressItem(name, id, fileObject, storageKey, initialOffset) {
-            const element = document.createElement('div');
-            element.className = 'bg-white dark:bg-gray-800 rounded-xl p-4 shadow-sm border border-gray-200 dark:border-gray-700';
-            element.innerHTML = `
-                <div class="flex items-center justify-between mb-3">
-                    <div class="flex items-center gap-3 min-w-0">
-                        <span class="text-xl">📄</span>
-                        <span class="font-medium text-gray-900 dark:text-white truncate">${escapeHtml(name)}</span>
-                    </div>
-                    <div class="flex items-center gap-2">
-                        <span class="percent text-sm font-medium text-gray-600 dark:text-gray-300">0%</span>
-                        <button class="cancel-btn p-1 text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded transition-colors" title="Cancel">
-                            ✕
-                        </button>
-                    </div>
-                </div>
-                <div class="w-full h-2 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
-                    <div class="bar h-full bg-gradient-to-r from-brand-500 to-brand-600 rounded-full transition-all duration-300 relative overflow-hidden">
-                        <div class="progress-shimmer absolute inset-0"></div>
-                    </div>
-                </div>
-                <div class="status-text mt-2 text-xs text-gray-500 dark:text-gray-400"></div>
-            `;
-            
-            const bar = element.querySelector('.bar');
-            const percentText = element.querySelector('.percent');
-            const cancelBtn = element.querySelector('.cancel-btn');
-            const statusText = element.querySelector('.status-text');
-
-            const item = {
-                id, name, fileSize: fileObject.size, element,
-                xhr: null, offset: initialOffset || 0, isPaused: false, isActionLock: false, status: 'uploading',
-                storageKey: storageKey || null,
-
-                update: (p) => {
-                    bar.style.width = p + '%';
-                    percentText.textContent = Math.round(p) + '%';
-                    if (storageKey) {
-                        const bytesNow = Math.round((p / 100) * fileObject.size);
-                        localStorage.setItem(storageKey, JSON.stringify({ uploadId: id, bytesReceived: bytesNow }));
-                    }
-                },
-
-                setStatus: (text, type = 'info') => {
-                    const colors = {
-                        info: 'text-gray-500 dark:text-gray-400',
-                        success: 'text-green-600 dark:text-green-400',
-                        error: 'text-red-600 dark:text-red-400',
-                        warning: 'text-yellow-600 dark:text-yellow-400'
-                    };
-                    statusText.className = `status-text mt-2 text-xs ${colors[type]}`;
-                    statusText.textContent = text;
-                },
-
-                start: async function() {
-                    if (this.isActionLock) return;
-                    if (this.status === 'uploading' && this.xhr) return;
-
-                    let serverOffset = 0;
-                    let serverStatus = 'none';
-
-                    try {
-                        const res = await fetch(`${serverUrl}/api/upload/status?id=${this.id}&filename=${encodeURIComponent(name)}&token=${token}`);
-                        const data = await res.json();
-                        serverOffset = data.size || 0;
-                        serverStatus = data.status || 'none';
-                    } catch (e) {
-                        serverOffset = this.offset;
-                    }
-
-                    // Terminal states
-                    if (serverStatus === 'completed' || serverOffset >= fileObject.size) {
-                        this.isPaused = false;
-                        this.update(100);
-                        this.done();
-                        return;
-                    }
-
-                    if (serverStatus === 'cancelled') {
-                        this.cancelled();
-                        return;
-                    }
-
-                    // Error state - stop
-                    if (serverStatus === 'error') {
-                        this.status = 'error';
-                        this.setStatus('Upload failed', 'error');
-                        return;
-                    }
-
-                    // Paused state - wait for SSE to trigger resume
-                    if (serverStatus === 'paused') {
-                        this.isPaused = true;
-                        this.status = 'paused';
-                        this.offset = serverOffset;
-                        this.update((serverOffset / this.fileSize) * 100);
-                        this.setStatus('Paused - waiting for phone', 'warning');
-                        // DO NOT poll - SSE will trigger resume when ready
-                        return;
-                    }
-
-                    // Ready to upload
-                    this.isActionLock = true;
-                    this.isPaused = false;
-                    this.status = 'uploading';
-                    this.offset = serverOffset;
-                    this.setStatus('Uploading...', 'info');
-
-                    const chunk = fileObject.slice(this.offset);
-                    const percentBase = (this.offset / this.fileSize) * 100;
-                    this.update(percentBase);
-
-                    return new Promise((resolve, reject) => {
-                        this.xhr = new XMLHttpRequest();
-                        this.xhr.open('POST', `${serverUrl}/api/upload?token=${token}&filename=${encodeURIComponent(name)}&id=${this.id}`);
-                        if (this.offset > 0) {
-                            this.xhr.setRequestHeader('Content-Range', `bytes ${this.offset}-${fileObject.size-1}/${fileObject.size}`);
-                        }
-
-                        this.xhr.upload.onprogress = (e) => {
-                            if (this.isPaused) return;
-                            if (e.lengthComputable) {
-                                const chunkProgress = e.loaded / e.total;
-                                const totalProgress = percentBase + (chunkProgress * (100 - percentBase));
-                                this.update(Math.min(totalProgress, 99.9));
-                            }
-                        };
-
-                        this.xhr.onload = () => {
-                            const xhrRef = this.xhr;
-                            this.isActionLock = false;
-                            this.xhr = null;
-
-                            if (xhrRef.status >= 200 && xhrRef.status < 300) {
-                                try {
-                                    const resp = JSON.parse(xhrRef.responseText);
-                                    if (resp.success) {
-                                        this.status = 'completed';
-                                        this.update(100);
-                                        this.setStatus('Completed', 'success');
-                                        this.done();
-                                        resolve();
-                                    } else if (resp.status === 'cancelled') {
-                                        this.cancelled();
-                                        resolve();
-                                    } else if (resp.status === 'paused') {
-                                        this.remotePause(resp.bytesReceived || serverOffset);
-                                        resolve();
-                                    } else {
-                                        this.status = 'error';
-                                        this.setStatus('Error: ' + resp.status, 'error');
-                                        reject(new Error(resp.status));
-                                    }
-                                } catch(e) {
-                                    this.status = 'error';
-                                    this.setStatus('Parse error', 'error');
-                                    reject(e);
-                                }
-                            } else {
-                                this.status = 'error';
-                                this.setStatus(`HTTP ${xhrRef.status}`, 'error');
-                                reject(new Error('HTTP ' + xhrRef.status));
-                            }
-                        };
-
-                        this.xhr.onerror = () => {
-                            this.isActionLock = false;
-                            this.status = 'error';
-                            this.setStatus('Network error', 'error');
-                            reject(new Error('Network error'));
-                        };
-
-                        this.xhr.onabort = () => {
-                            this.isActionLock = false;
-                        };
-
-                        this.xhr.send(chunk);
-                    });
-                },
-
-                remotePause: function(serverOffset) {
-                    this.isPaused = true;
-                    this.isActionLock = false;
-                    this.status = 'paused';
-                    this.offset = serverOffset;
-                    this.update((serverOffset / this.fileSize) * 100);
-                    this.setStatus('Paused by phone', 'warning');
-                    // DO NOT start polling - SSE will trigger resume
-                },
-
-                cancelled: function() {
-                    this.status = 'cancelled';
-                    this.setStatus('Cancelled', 'error');
-                    if (this.xhr) this.xhr.abort();
-                    if (this.storageKey) localStorage.removeItem(this.storageKey);
-                    setTimeout(() => this.element.remove(), 1000);
-                },
-
-                done: function() {
-                    if (this.storageKey) localStorage.removeItem(this.storageKey);
-                    setTimeout(() => loadFiles(), 500);
-                }
-            };
-
-            cancelBtn.onclick = () => {
-                fetch(`${serverUrl}/api/upload/cancel?token=${token}&uploadId=${id}`, { method: 'POST' });
-                item.cancelled();
-            };
-
-            return item;
         }
 
         // ==========================================
@@ -1017,7 +1039,9 @@
         }
 
         // Expose for debugging
-        window.activeUploads = activeUploads;
+        window.DEBUG_UPLOAD = false;
+        window.uploadQueue = uploadQueue;
+        window.debugLog = debugLog;
     </script>
 </body>
 </html>

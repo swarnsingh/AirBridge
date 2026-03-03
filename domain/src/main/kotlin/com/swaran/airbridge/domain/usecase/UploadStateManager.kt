@@ -14,10 +14,30 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Deterministic upload state manager - Protocol v2.
+ * Deterministic upload state manager - Protocol v2.1.
  *
- * States: NONE, UPLOADING, PAUSED, COMPLETED, CANCELLED, ERROR
- * No transitional states (QUEUED, PAUSING, RESUMING, ERROR_RETRYABLE).
+ * Manages upload state transitions with atomic compare-and-set operations.
+ * All transitions are validated against the UploadState.canTransitionTo() rules.
+ *
+ * ## Supported States
+ *
+ * - **NONE**: Initial state, upload registered but not started
+ * - **QUEUED**: Waiting for browser POST (transition from NONE)
+ * - **RESUMING**: Resume handshake in progress, browser must POST within deadline
+ * - **UPLOADING**: Actively receiving bytes from browser
+ * - **PAUSING**: Pause requested, finishing current chunk (transitional)
+ * - **PAUSED**: Suspended, can resume from disk offset
+ * - **COMPLETED**: All bytes received successfully
+ * - **CANCELLED**: User cancelled, partial file deleted
+ * - **ERROR**: Permanent error (permission denied, file deleted, etc.)
+ *
+ * ## Thread Safety
+ *
+ * All operations use ConcurrentHashMap and AtomicReference for thread-safe
+ * state updates without blocking. StateFlow is throttled to prevent
+ * excessive UI updates.
+ *
+ * @see UploadState For state machine transition rules
  */
 @Singleton
 class UploadStateManager @Inject constructor(

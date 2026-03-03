@@ -7,17 +7,20 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
-import com.swaran.airbridge.core.common.logging.AirLogger
 import androidx.documentfile.provider.DocumentFile
+import com.swaran.airbridge.core.common.logging.AirLogger
 import com.swaran.airbridge.core.storage.datasource.MediaStoreDataSource
 import com.swaran.airbridge.core.storage.datasource.SafDataSource
+import com.swaran.airbridge.domain.model.FileDeletedExternallyException
 import com.swaran.airbridge.domain.model.FileItem
 import com.swaran.airbridge.domain.model.FolderItem
+import com.swaran.airbridge.domain.model.UploadCancelledException
+import com.swaran.airbridge.domain.model.UploadPausedException
 import com.swaran.airbridge.domain.repository.StorageAccessManager
 import com.swaran.airbridge.domain.repository.StorageRepository
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.runInterruptible
+import kotlinx.coroutines.yield
 import java.io.InputStream
 import java.io.OutputStream
 import javax.inject.Inject
@@ -311,12 +314,31 @@ class FileRepository @Inject constructor(
             Result.success(result)
         } catch (e: Exception) {
             // Don't wrap control-flow exceptions - let them propagate
-            if (e is kotlinx.coroutines.CancellationException ||
-                e.javaClass.name.contains("UploadPaused") ||
-                e.javaClass.name.contains("UploadCancelled")) {
+            if (e is CancellationException || e is UploadPausedException || e is UploadCancelledException) {
                 logger.d(TAG, "uploadFile", "[$uploadId] Control exception, rethrowing: ${e.javaClass.simpleName}")
                 throw e
             }
+            
+            // Check for external file deletion specifically
+            val isFileDeleted = when {
+                e is java.io.FileNotFoundException -> true
+                e.message?.contains("ENOENT") == true -> true  // No such file or directory
+                e.message?.contains("not found", ignoreCase = true) == true -> true
+                e.message?.contains("No such file", ignoreCase = true) == true -> true
+                // SAF-specific: DocumentFile was deleted
+                e is IllegalStateException && e.message?.contains("Failed to open", ignoreCase = true) == true -> {
+                    // Check if file still exists by trying to find it
+                    val fileStillExists = findFileByName(path, fileName).getOrNull() != null
+                    !fileStillExists
+                }
+                else -> false
+            }
+            
+            if (isFileDeleted) {
+                logger.w(TAG, "uploadFile", "[$uploadId] File deleted externally during upload")
+                throw FileDeletedExternallyException("File was deleted externally: $fileName", e)
+            }
+            
             logger.e(TAG, "uploadFile", e, "[$uploadId] Upload failed: ${e.javaClass.simpleName}: ${e.message}")
             Result.failure(e)
         }
@@ -443,9 +465,8 @@ class FileRepository @Inject constructor(
         } catch (e: Exception) {
             // Don't delete on CancellationException (pause) or UploadPausedException
             // We want to keep partial files for resume
-            val isPauseException = e is kotlinx.coroutines.CancellationException || 
-                                   e.javaClass.name.contains("UploadPaused")
-            
+            val isPauseException = e is CancellationException || e is UploadPausedException
+
             if (!isPauseException && !append) {
                 logger.d(TAG, "uploadToMediaStore", "Deleting partial file after error: ${e.javaClass.simpleName}")
                 contentResolver.delete(uri, null, null)
@@ -467,26 +488,34 @@ class FileRepository @Inject constructor(
     /**
      * Copies input to output with cancellation support.
      *
-     * Uses [runInterruptible] to make the blocking [read] call cancellable.
-     * Without this, pausing an upload would hang until the socket timeout
-     * because [read] blocks waiting for network data.
+     * Uses small chunks (8KB) and explicit cancellation checks for instant pause.
+     * Uses yield() to check for cancellation which throws CancellationException if cancelled.
      *
      * @param out Output stream to write to
-     * @param bufferSize Buffer size for each read/write (default 16KB)
+     * @param bufferSize Buffer size for each read/write (default 8KB for quick cancellation)
      * @param onProgress Called after each write with total bytes written
      */
-    private suspend fun InputStream.copyToCancellable(out: OutputStream, bufferSize: Int = 16*1024, onProgress: (Long) -> Unit) {
-        kotlinx.coroutines.runInterruptible {
-            var total: Long = 0
-            val buffer = ByteArray(bufferSize)
-            var bytes = read(buffer)
-            while (bytes >= 0) {
-                out.write(buffer, 0, bytes)
-                total += bytes
-                onProgress(total)
-                bytes = read(buffer)
-            }
+    private suspend fun InputStream.copyToCancellable(out: OutputStream, bufferSize: Int = 8*1024, onProgress: (Long) -> Unit) {
+        val buffer = ByteArray(bufferSize)
+        var total: Long = 0
+        var bytesRead: Int
+
+        while (true) {
+            // Check cancellation before each read - throws CancellationException if cancelled
+            yield()
+
+            bytesRead = read(buffer)
+            if (bytesRead < 0) break
+
+            out.write(buffer, 0, bytesRead)
+            total += bytesRead
+            onProgress(total)
+
+            // Check cancellation after each write for instant pause
+            yield()
         }
+
+        out.flush()
     }
 
     /**

@@ -61,6 +61,7 @@ class UploadRoutes @Inject constructor(
             uploadPauseRoute()
             uploadResumeRoute()
             uploadCancelRoute()
+            uploadMetricsRoute()
         }
     }
 
@@ -84,8 +85,9 @@ class UploadRoutes @Inject constructor(
             call.respondNoCache(HttpStatusCode.OK, buildJsonObject {
                 put("exists", status.exists)
                 put("bytesReceived", status.bytesReceived)
-                put("state", status.state)
+                put("status", status.state)
                 put("canResume", status.canResume)
+                put("isBusy", status.isBusy)
             })
         }
     }
@@ -118,7 +120,7 @@ class UploadRoutes @Inject constructor(
                         uploads.values.toList()
                     }
 
-                    filtered.filter { !it.isTerminal }.forEach { status ->
+                    filtered.forEach { status ->
                         trySend(formatUploadEvent(status))
                     }
 
@@ -147,9 +149,9 @@ class UploadRoutes @Inject constructor(
         return buildString {
             append("data: {")
             append("\"type\":\"upload\",")
-            append("\"uploadId\":\"${status.metadata.uploadId}\",")
+            append("\"${ResponseFields.UPLOAD_ID}\":\"${status.metadata.uploadId}\",")
             append("\"fileName\":\"${status.metadata.displayName}\",")
-            append("\"state\":\"${mapState(status.state)}\",")
+            append("\"state\":\"${status.state.value}\",")
             append("\"bytesReceived\":${status.bytesReceived},")
             append("\"totalBytes\":${status.metadata.totalBytes},")
             append("\"progress\":${status.progressPercent}")
@@ -167,15 +169,6 @@ class UploadRoutes @Inject constructor(
             append("\"paused\":${state.pausedCount}")
             append("}\n\n")
         }
-    }
-
-    private fun mapState(state: UploadState): String = when (state) {
-        UploadState.NONE -> "queued"
-        UploadState.UPLOADING -> "uploading"
-        UploadState.PAUSED -> "paused"
-        UploadState.COMPLETED -> "completed"
-        UploadState.CANCELLED -> "cancelled"
-        UploadState.ERROR -> "error"
     }
 
     private fun Route.uploadPostRoute() {
@@ -217,8 +210,12 @@ class UploadRoutes @Inject constructor(
                 contentRange = contentRange
             )
 
+            logger.d(TAG, "uploadPost", "[$uploadId] POST received: $fileName, offset=$offset, total=$totalBytes")
+
             // Enqueue and execute via queue manager
             val result = queueManager.enqueue(request) { call.receiveStream() }
+
+            logger.d(TAG, "uploadPost", "[$uploadId] Result: ${result.javaClass.simpleName}")
 
             when (result) {
                 is UploadResult.Success -> {
@@ -227,6 +224,17 @@ class UploadRoutes @Inject constructor(
                         put(ResponseFields.UPLOAD_ID, result.uploadId)
                         put(ResponseFields.BYTES_RECEIVED, result.bytesReceived)
                         put("state", "completed")
+                    })
+                }
+
+                is UploadResult.Busy -> {
+                    logger.d(TAG, "uploadPost", "[$uploadId] Returning 409 busy (retryAfterMs=${result.retryAfterMs})")
+                    call.respondNoCache(HttpStatusCode.Conflict, buildJsonObject {
+                        put(ResponseFields.SUCCESS, false)
+                        put(ResponseFields.UPLOAD_ID, result.uploadId)
+                        put("status", "busy")
+                        put("retryAfterMs", result.retryAfterMs)
+                        put("message", "Server busy - retry with backoff")
                     })
                 }
 
@@ -247,7 +255,20 @@ class UploadRoutes @Inject constructor(
                     })
                 }
 
+                is UploadResult.Failure.FileDeleted -> {
+                    logger.w(TAG, "uploadPost", "[$uploadId] File deleted externally during upload")
+                    call.respondNoCache(HttpStatusCode.Gone, buildJsonObject {
+                        put(ResponseFields.SUCCESS, false)
+                        put(ResponseFields.UPLOAD_ID, result.uploadId)
+                        put(ResponseFields.BYTES_RECEIVED, result.bytesReceived)
+                        put("state", "error")
+                        put("error", "file_deleted")
+                        put("message", "File was deleted externally")
+                    })
+                }
+
                 is UploadResult.Failure.OffsetMismatch -> {
+                    logger.w(TAG, "uploadPost", "[$uploadId] Offset mismatch: expected=${result.expectedOffset}, disk=${result.actualDiskSize}")
                     call.respondNoCache(HttpStatusCode.Conflict, buildJsonObject {
                         put(ResponseFields.SUCCESS, false)
                         put(ResponseFields.UPLOAD_ID, result.uploadId)
@@ -259,6 +280,7 @@ class UploadRoutes @Inject constructor(
                 }
 
                 is UploadResult.Failure -> {
+                    logger.e(TAG, "uploadPost", "[$uploadId] Error: ${result.javaClass.simpleName}")
                     call.respondNoCache(HttpStatusCode.OK, buildJsonObject {
                         put(ResponseFields.SUCCESS, false)
                         put(ResponseFields.UPLOAD_ID, result.uploadId)
@@ -332,8 +354,12 @@ class UploadRoutes @Inject constructor(
             val uploadId = call.request.queryParameters[QueryParams.UPLOAD_ID]
                 ?: return@post call.respond(HttpStatusCode.BadRequest, errorJson("Missing uploadId"))
 
-            val path = call.request.queryParameters[QueryParams.PATH] ?: "/"
-            val fileName = call.request.queryParameters[QueryParams.FILENAME] ?: ""
+            // Get upload status to extract file info
+            val status = scheduler.activeUploads.value[uploadId]
+            logger.d(TAG, "uploadCancel", "[$uploadId] Status found: ${status != null}, state: ${status?.state}, metadata: ${status?.metadata}")
+            
+            val path = status?.metadata?.path ?: (call.request.queryParameters[QueryParams.PATH] ?: "/")
+            val fileName = status?.metadata?.displayName ?: (call.request.queryParameters[QueryParams.FILENAME] ?: "")
 
             val request = UploadRequest(
                 uploadId = uploadId,
@@ -349,6 +375,49 @@ class UploadRoutes @Inject constructor(
             call.respondNoCache(HttpStatusCode.OK, buildJsonObject {
                 put(ResponseFields.SUCCESS, true)
                 put("state", "cancelled")
+            })
+        }
+    }
+
+    private fun Route.uploadMetricsRoute() {
+        get("/api/metrics") {
+            val token = call.request.queryParameters[QueryParams.TOKEN]
+                ?: return@get call.respond(HttpStatusCode.Unauthorized, errorJson("Missing token"))
+
+            if (!sessionTokenManager.validateSession(token)) {
+                return@get call.respond(HttpStatusCode.Unauthorized, errorJson("Invalid token"))
+            }
+
+            val uploads = scheduler.activeUploads.value
+            val queueState = queueManager.queueState.value
+
+            // Calculate metrics
+            val activeUploads = uploads.values.count { it.state == UploadState.UPLOADING }
+            val pausedUploads = uploads.values.count { it.state == UploadState.PAUSED }
+            val completedUploads = uploads.values.count { it.state == UploadState.COMPLETED }
+            val errorUploads = uploads.values.count { it.state == UploadState.ERROR }
+
+            // Calculate average throughput
+            val uploadingItems = uploads.values.filter { it.state == UploadState.UPLOADING && it.bytesPerSecond > 0 }
+            val avgThroughput = if (uploadingItems.isNotEmpty()) {
+                uploadingItems.map { it.bytesPerSecond }.average()
+            } else 0.0
+
+            call.respondNoCache(HttpStatusCode.OK, buildJsonObject {
+                put("timestamp", System.currentTimeMillis())
+                put("uploads", buildJsonObject {
+                    put("total", uploads.size)
+                    put("active", activeUploads)
+                    put("paused", pausedUploads)
+                    put("completed", completedUploads)
+                    put("error", errorUploads)
+                    put("queued", queueState.queuedCount)
+                })
+                put("throughput", buildJsonObject {
+                    put("avgBytesPerSecond", avgThroughput)
+                    put("avgMBps", (avgThroughput / 1_000_000).toFloat())
+                })
+                put("protocol", "v2.1-failfast")
             })
         }
     }
@@ -375,7 +444,7 @@ class UploadRoutes @Inject constructor(
             sanitized = sanitized.substring(0, MAX_FILENAME_LENGTH)
         }
         if (sanitized.matches(Regex("^\\.+$"))) {
-            sanitized = "_" + sanitized
+            sanitized = "_$sanitized"
         }
         return sanitized
     }

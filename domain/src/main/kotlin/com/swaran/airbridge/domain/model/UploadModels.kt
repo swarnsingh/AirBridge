@@ -1,29 +1,38 @@
 package com.swaran.airbridge.domain.model
 
 /**
- * Upload state machine states - deterministic protocol v2.
+ * Upload state machine states - deterministic protocol v2.1 (fail-fast).
  *
- * Only 6 states. No transitional states (RESUMING, PAUSING, ERROR_RETRYABLE).
- * Disk size is source of truth. Resume is implicit.
+ * States: NONE → QUEUED → RESUMING → UPLOADING → PAUSING → PAUSED → COMPLETED/CANCELLED/ERROR
+ * Disk size is source of truth. Resume is POST-driven.
  */
-enum class UploadState {
-    NONE,        // No upload registered
-    UPLOADING,   // Actively receiving bytes
-    PAUSED,      // Suspended, can resume
-    COMPLETED,   // All bytes received successfully
-    CANCELLED,   // User cancelled, partial deleted
-    ERROR;       // Permanent error (permission, deleted, etc)
+enum class UploadState(val value: String) {
+    NONE("none"),        // No upload registered
+    QUEUED("queued"),    // Waiting for resources
+    RESUMING("resuming"),// Resume handshake window (deadline enforced)
+    UPLOADING("uploading"),// Actively receiving bytes
+    PAUSING("pausing"),  // Cancellation requested, finishing current chunk
+    PAUSED("paused"),    // Suspended, can resume from disk size
+    COMPLETED("completed"),// All bytes received successfully
+    CANCELLED("cancelled"),// User cancelled, partial file deleted
+    ERROR("error");      // Permanent error (permission, deleted, etc)
 
     fun canTransitionTo(target: UploadState): Boolean {
         if (this == target) return true
 
         return when (this) {
-            NONE -> target in setOf(UPLOADING, CANCELLED)
-            UPLOADING -> target in setOf(PAUSED, COMPLETED, CANCELLED, ERROR)
-            PAUSED -> target in setOf(UPLOADING, CANCELLED)  // Browser POSTs -> UPLOADING
+            NONE -> target in setOf(QUEUED, UPLOADING, CANCELLED)
+            QUEUED -> target in setOf(RESUMING, UPLOADING, CANCELLED)
+            RESUMING -> target in setOf(UPLOADING, PAUSED, CANCELLED)
+            UPLOADING -> target in setOf(PAUSING, PAUSED, COMPLETED, CANCELLED, ERROR)
+            PAUSING -> target in setOf(PAUSED, CANCELLED, ERROR)
+            PAUSED -> target in setOf(RESUMING, CANCELLED)
             COMPLETED, CANCELLED, ERROR -> false  // Terminal states
         }
     }
+
+    val isTerminal: Boolean
+        get() = this in setOf(COMPLETED, CANCELLED, ERROR)
 }
 
 /**
@@ -95,6 +104,15 @@ sealed class UploadResult {
 
     data class Cancelled(val uploadId: String) : UploadResult()
 
+    /**
+     * Server is busy - file locked or concurrency limit reached.
+     * Client should retry with exponential backoff.
+     */
+    data class Busy(
+        val uploadId: String,
+        val retryAfterMs: Int = 200
+    ) : UploadResult()
+
     sealed class Failure : UploadResult() {
         abstract val uploadId: String
         abstract val bytesReceived: Long
@@ -134,3 +152,9 @@ sealed class UploadResult {
  */
 class UploadPausedException : Exception("Upload paused by user")
 class UploadCancelledException : Exception("Upload cancelled by user")
+
+/**
+ * Exception thrown when file is deleted externally during upload.
+ * This allows the scheduler to handle it as a retryable error with specific messaging.
+ */
+class FileDeletedExternallyException(message: String, cause: Throwable? = null) : Exception(message, cause)

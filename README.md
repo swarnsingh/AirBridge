@@ -1,361 +1,479 @@
-AirBridge
-=========
+# AirBridge
 
-Overview
---------
+## Deterministic Resumable File Transfer
 
-AirBridge is a robust, high‑performance Android LAN file‑sharing app that transforms your device into a local HTTP server. It enables seamless, lightning-fast file transfers between your phone and any browser on the same Wi‑Fi network. Built with modern Android standards, it features a foreground service, parallel resumable upload support, and a responsive web UI—all without requiring any cloud backend or internet connection.
+AirBridge enables peer-to-peer file transfers between Android devices and web browsers over local Wi-Fi using a deterministic resumable upload protocol.
 
-Key Features
------------
+---
 
-- **High-Performance Transfers**
-  - **True Parallel Uploads**: Send multiple files simultaneously from your browser.
-  - **Manual Pause & Resume**: Individually control every parallel transfer. Pause an upload on your phone and resume it later from your browser (or vice versa).
-  - **Robust Cancellation**: Stop ongoing transfers instantly with proper cleanup. "Cancel" deletes partial data, while "Pause" preserves it for resumption.
-  - **Background Reliability**: Uses a **Foreground Service** + **WakeLock** to ensure transfers continue even when the app is in the background or the screen is off.
-- **Modern Android Integration**
-  - **Zero-Config Startup**: Automatically uses a default "AirBridge" folder in `Downloads` for immediate use.
-  - **Custom Storage**: Seamlessly switch between the default folder and any specific directory via the Storage Access Framework (SAF).
-  - **Latest Tech Stack**: Targets **Android 16 (API 36)** and requires **Android 12 (API 31)** as minimum.
-- **Seamless Connectivity**
-  - **Bidirectional Control**: Manage uploads from both the Android App Dashboard and the Web Interface.
-  - **Instant Pairing**: Connect via QR Code scanning or "Copy URL".
-  - **Automatic Resumption**: Browser-side persistence tracks interrupted uploads, allowing them to resume exactly where they left off after a reconnect.
+## Key Features
 
-Architecture
-------------
+| Feature | Description |
+|---------|-------------|
+| **Parallel Uploads** | Transfer multiple files simultaneously with independent pause/resume control |
+| **Deterministic Resume** | POST-driven resume protocol eliminates deadlocks and race conditions |
+| **Fail-Fast Concurrency** | Server returns Busy immediately instead of blocking — browser handles retry |
+| **Bidirectional Control** | Pause and resume from either phone or browser |
+| **Direct Append Model** | Files written directly to final location — no temporary files |
+| **Offset Validation** | Strict disk-size validation prevents duplicate bytes and corruption |
+| **Event-Driven UI** | Real-time progress via Server-Sent Events (SSE) |
+| **Clean Architecture** | Separation of Control Plane (HTTP API) and Data Plane (streaming) |
 
-### System Architecture
+---
+
+## Architecture Overview
+
+### High-Level System
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                           ANDROID DEVICE                                  │
-│                                                                          │
-│  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │                      AIRBRIDGE APP                                 │   │
-│  │                                                                   │   │
-│  │  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐       │   │
-│  │  │  Jetpack     │    │   Ktor CIO   │    │  Foreground  │       │   │
-│  │  │  Compose UI  │◄──►│   Server     │◄──►│   Service    │       │   │
-│  │  │              │    │   (Port 8081)│    │  + WakeLock  │       │   │
-│  │  └──────────────┘    └──────┬───────┘    └──────────────┘       │   │
-│  │         ▲                   │                                    │   │
-│  │         │                   │ HTTP Requests                    │   │
-│  │         │                   ▼                                    │   │
-│  │  ┌──────┴──────┐    ┌──────────────┐                            │   │
-│  │  │  Upload     │◄──►│   Browser    │                            │   │
-│  │  │  Scheduler  │    │   (Any WiFi) │                            │   │
-│  │  └─────────────┘    └──────────────┘                            │   │
-│  │         │                                                        │   │
-│  │         │                                                        │   │
-│  │  ┌──────┴──────┐    ┌──────────────┐    ┌──────────────┐       │   │
-│  │  │  FileRepo   │◄──►│  MediaStore  │    │     SAF      │       │   │
-│  │  │             │    │  (Default)   │    │  (Optional)  │       │   │
-│  │  └─────────────┘    └──────────────┘    └──────────────┘       │   │
-│  │                                                                   │   │
-│  └───────────────────────────────────────────────────────────────────┘   │
-│                                                                          │
-└─────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                        BROWSER (Web UI)                         │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐   │
+│  │ UploadQueue  │  │   Resume     │  │     SSE Client       │   │
+│  │   Manager    │  │   Engine     │  │                      │   │
+│  └──────────────┘  └──────────────┘  └──────────────────────┘   │
+└──────────────────────────────┬──────────────────────────────────┘
+                               │ HTTP (POST / SSE)
+                               ▼
+┌───────────────────────────────────────────────────────────────────┐
+│                    ANDROID (Ktor HTTP Server)                     │
+│  ┌──────────────┐    ┌──────────────┐    ┌──────────────────────┐ │
+│  │ UploadRoutes │    │   Upload     │    │  UploadStateManager  │ │
+│  │   (HTTP)     │──► │  Scheduler   │──► │   (State Machine)    │ │
+│  └──────────────┘    └──────────────┘    └──────────────────────┘ │
+│         │                 │                  │                    │
+│         │                 │                  │                    │
+│         └─────────────────┴──────────────────┘                    │
+│                           │                                       │
+│                           ▼                                       │
+│                  ┌──────────────────┐                             │
+│                  │ StorageRepository│                             │
+│                  │ (Direct Append)  │                             │
+│                  └────────┬─────────┘                             │
+└───────────────────────────┼───────────────────────────────────────┘
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                 ANDROID STORAGE (SAF / MediaStore)              │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-### Module Structure
+### Layer Responsibilities
 
-AirBridge follows **Clean Architecture** principles with a highly modularized structure:
+| Layer | Responsibility |
+|-------|----------------|
+| **Browser** | Upload orchestration, exponential backoff, SSE consumption |
+| **UploadRoutes** | HTTP translation only — no business logic |
+| **UploadScheduler** | Fail-fast locking, offset validation, cooperative cancellation |
+| **UploadStateManager** | Deterministic state machine with transition validation |
+| **StorageRepository** | Direct append I/O with small chunks (8KB) |
+
+---
+
+## Deterministic Upload Protocol v2.1
+
+### Core Principles
+
+1. **Disk Offset is Source of Truth** — Browser must POST from exact disk size
+2. **POST-Driven Resume** — Browser initiates, server never auto-resumes
+3. **Fail-Fast Concurrency** — `tryLock()` + `tryAcquire()` return immediately
+4. **Never Block on Resources** — Server returns 409 Busy, browser retries
+
+### Resume Handshake
 
 ```
-┌────────────────────────────────────────────────────────────────┐
-│                        PRESENTATION                            │
-│                      (Android UI Layer)                        │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐ │
-│  │  feature:   │  │  feature:   │  │       feature:          │ │
-│  │  dashboard  │  │ filebrowser │  │     permissions         │ │
-│  │             │  │             │  │                         │ │
-│  │ • Uploads   │  │ • Browse    │  │ • Storage access        │ │
-│  │ • Server    │  │ • Download  │  │ • Pairing               │ │
-│  │ • QR Code   │  │ • Navigate  │  │                         │ │
-│  └─────────────┘  └─────────────┘  └─────────────────────────┘ │
-│          │              │                      │               │
-│          └──────────────┴──────────────────────┘               │
-│                         │                                      │
-│                         ▼                                      │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │                    core:mvi                             │   │
-│  │              (MVI Framework)                            │   │
-│  │  • StateFlow-based state management                     │   │
-│  │  • Intent/State/Effect pattern                          │   │
-│  └─────────────────────────────────────────────────────────┘   │
-└────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌────────────────────────────────────────────────────────────────┐
-│                           DOMAIN                               │
-│                   (Pure Kotlin, No Android)                    │
-│                                                                │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐ │
-│  │  Entities   │  │  Use Cases  │  │   Repository Interfaces │ │
-│  │             │  │             │  │                         │ │
-│  │ • FileItem  │  │ • Start     │  │ • StorageRepository     │ │
-│  │ • FolderItem│  │   Server    │  │ • StorageAccessManager  │ │
-│  │ • Server    │  │ • Generate  │  │                         │ │
-│  │   Status    │  │   QR Code   │  │                         │ │
-│  └─────────────┘  └─────────────┘  └─────────────────────────┘ │
-└────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌────────────────────────────────────────────────────────────────┐
-│                          DATA LAYER                            │
-│                                                                │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │                      core:network                       │   │
-│  │                                                         │   │
-│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │   │
-│  │  │KtorLocalServer│  │UploadScheduler│  │ UploadRoutes │  │   │
-│  │  │              │  │              │  │              │  │   │
-│  │  │ • Ktor CIO   │  │ • State      │  │ • HTTP API   │  │   │
-│  │  │ • Routing    │  │   machine    │  │ • Auth       │  │   │
-│  │  │ • Security   │  │ • Pause/Resume│  │              │  │   │
-│  │  └──────────────┘  └──────────────┘  └──────────────┘  │   │
-│  └─────────────────────────────────────────────────────────┘   │
-│                                                                │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │                      core:storage                     │   │
-│  │                                                         │   │
-│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │   │
-│  │  │ FileRepository│  │MediaStoreData│  │SafDataSource │  │   │
-│  │  │              │  │   Source     │  │              │  │   │
-│  │  │ • Dual mode  │  │ • Query API  │  │ • DocumentFile│  │   │
-│  │  │ • Resume     │  │ • Insert     │  │ • Tree nav   │  │   │
-│  │  └──────────────┘  └──────────────┘  └──────────────┘  │   │
-│  └─────────────────────────────────────────────────────────┘   │
-│                                                                │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │                      core:service                       │   │
-│  │                                                         │   │
-│  │  ┌─────────────────────────────────────────────────┐    │   │
-│  │  │      ForegroundServerService                    │    │   │
-│  │  │  • Prevents app kill during transfers           │    │   │
-│  │  │  • WakeLock for CPU during upload               │    │   │
-│  │  │  • Notification channel for user awareness       │    │   │
-│  └─────────────────────────────────────────────────────────┘   │
-└────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌────────────────────────────────────────────────────────────────┐
-│                         EXTERNAL                               │
-│                                                                │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐ │
-│  │  MediaStore  │  │   SAF        │  │     Browser        │ │
-│  │  (Android)   │  │ (Android)    │  │   (Any Device)      │ │
-│  │              │  │              │  │                     │ │
-│  └──────────────┘  └──────────────┘  └──────────────────────┘ │
-└────────────────────────────────────────────────────────────────┘
+Phone UI          Server              Browser
+   │                │                   │
+   │ resumeUpload() │                   │
+   │───────────────►│                   │
+   │                │ state=RESUMING    │
+   │                │ (5s deadline)     │
+   │                │                   │
+   │                │◄──────────────────│ POST /upload
+   │                │   Content-Range:  │   bytes offset-end/total
+   │                │                   │
+   │                │ tryLock()         │
+   │                │ tryAcquire()      │
+   │                │ offset==diskSize  │
+   │                │                   │
+   │                │ state=UPLOADING   │
+   │                │──────────────────►│ 200 OK
 ```
 
-### Upload State Machine
+### State Machine
 
 ```
                     ┌─────────┐
-         ┌─────────►│  QUEUED │────────┐
+         ┌─────────►│  NONE   │────────┐
          │          └────┬────┘        │
          │               │             │
          │               ▼             │
-    ┌────┴────┐    ┌──────────┐    ┌───┴────┐
-    │ CANCELLED│◄───│ UPLOADING│───►│ PAUSED │
-    └─────────┘    └────┬─────┘    └────────┘
-         ▲              │
-         │              ▼
-         │         ┌──────────┐
-         └─────────│ COMPLETED│
-                   └──────────┘
+    ┌────┴────┐    ┌──────────┐    ┌───┴────────┐
+    │CANCELLED│◄───│ UPLOADING│───►│  PAUSING   │
+    └─────────┘    └────┬─────┘    └─────┬──────┘
+         ▲              │                │
+         │              ▼                ▼
+         │         ┌──────────┐    ┌─────────┐
+         └─────────│ COMPLETED│    │  PAUSED │
+                   └──────────┘    └────┬────┘
+                                          │
+                                          ▼
+                                    ┌──────────┐
+                                    │ RESUMING │
+                                    └──────────┘
 ```
 
-### Pause/Resume Architecture
+### Error Handling
 
-The system supports bidirectional pause/resume control from both the phone and browser.
+| HTTP Code | Condition | Browser Action |
+|-----------|-----------|----------------|
+| 200 | Success | Upload complete |
+| 409 Busy | File locked or at capacity | Retry with exponential backoff |
+| 409 Offset Mismatch | Browser offset ≠ disk size | Refresh offset from server, retry |
+| 410 | Cancelled | Stop upload |
+| 507 | Storage full | Show error, offer retry |
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                    BROWSER PAUSE → PHONE CONTROLS                       │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                          │
-│  Browser           Server              Phone UI                          │
-│     │                │                     │                              │
-│     │ POST /cancel   │                     │                              │
-│     │───────────────►│                     │                              │
-│     │                │ set CANCELLED       │                              │
-│     │                │                    │                              │
-│     │                │────────────────────►│ update UI                    │
-│     │                │                    │                              │
-└─────────────────────────────────────────────────────────────────────────┘
+---
 
-┌─────────────────────────────────────────────────────────────────────────┐
-│                    PHONE PAUSE → BROWSER RETRIES                        │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                          │
-│  Phone UI          Server              Browser                           │
-│     │                │                     │                              │
-│     │ pauseUpload()  │                     │                              │
-│     │───────────────►│                     │                              │
-│     │                │ set PAUSED          │                              │
-│     │                │                    │                              │
-│     │                │◄───────────────────│ GET /status                  │
-│     │                │                    │ (every 2s)                   │
-│     │                │ returns status=    │                              │
-│     │                │  "paused"           │                              │
-│     │                │────────────────────►│                              │
-│     │                │                    │                              │
-│     │                │                    ▼                              │
-│     │                │             ┌─────────────┐                        │
-│     │                │             │ showPauseUI│                        │
-│     │                │             └─────────────┘                        │
-│                                                                          │
-└─────────────────────────────────────────────────────────────────────────┘
+## Concurrency Model
 
-┌─────────────────────────────────────────────────────────────────────────┐
-│                    PHONE RESUME → BROWSER STARTS                        │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                          │
-│  Phone UI          Server              Browser                           │
-│     │                │                     │                              │
-│     │ resumeUpload() │                     │                              │
-│     │───────────────►│                     │                              │
-│     │                │ set RESUMING       │                              │
-│     │                │                    │                              │
-│     │                │◄───────────────────│ GET /status                  │
-│     │                │                    │ (every 2s)                   │
-│     │                │ returns status=    │                              │
-│     │                │  "resuming"         │                              │
-│     │                │────────────────────►│                              │
-│     │                │                    │                              │
-│     │                │                    ▼                              │
-│     │                │             ┌─────────────┐                        │
-│     │                │             │ start()     │                        │
-│     │                │             │ re-uploads  │                        │
-│     │                │             │ from offset │                        │
-│     │                │             └─────────────┘                        │
-│                                                                          │
-└─────────────────────────────────────────────────────────────────────────┘
-```
-
-### Key Design Decisions
-
-#### 1. Why Ktor + Coroutines?
-
-```
-Problem:  HTTP servers need to handle concurrent connections efficiently
-Solution: Ktor with coroutines provides non-blocking I/O and structured concurrency
-
-┌──────────┐         ┌──────────────────┐         ┌──────────────┐
-│  Browser │────────►│   Ktor Server    │────────►│  Coroutine   │
-│  Request │         │                  │         │  (IO thread) │
-└──────────┘         └──────────────────┘         └──────────────┘
-                            │                            │
-                            │  suspend function          │ actual work
-                            │  (non-blocking)            │ (non-blocking)
-                            │                            │
-                            ▼                            ▼
-                     ┌──────────────┐              ┌──────────────┐
-                     │ Handles other│              │ Uploads file │
-                     │ requests while│              │ with progress│
-                     │ waiting for I/O│              │              │
-                     └──────────────┘              └──────────────┘
-```
-
-#### 2. Why File-Level Locking?
-
-Prevents concurrent writes to the same file from different uploads:
+### File-Level Locking
 
 ```kotlin
-// Without file-level locks:
-Upload A: Check file.lock → not locked
-Upload B: Check file.lock → not locked  ← Both see unlocked!
-Upload A: Acquire lock, start writing
-Upload B: Acquire lock, start writing  ← Data corruption!
+val lockKey = "${request.path}/${request.fileName}"
+val fileMutex = fileLocks.getOrPut(lockKey) { Mutex() }
 
-// With file-level locking:
-val lockKey = "$path/$fileName"
-fileLocks[lockKey].withLock {
-    // Only one upload can write to this file at a time
+if (!fileMutex.tryLock()) {
+    return UploadResult.Busy(uploadId) // Fail fast
 }
 ```
 
-#### 3. Why State Machine with Atomic Transitions?
+**Guarantee**: Only one writer per file. No concurrent writes = no corruption.
 
-Prevents invalid state transitions and race conditions:
+### Global Concurrency Limit
 
 ```kotlin
-// Without state machine:
-Thread 1: Upload is UPLOADING, transitioning to PAUSED
-Thread 2: Reads state as UPLOADING, also tries to pause
-Thread 1: Updates state to PAUSED
-Thread 2: Updates state to PAUSED (redundant, but safe)
-
-// With atomic state machine:
-Thread 1: compareAndSet(UPLOADING → PAUSED) → success
-Thread 2: compareAndSet(UPLOADING → PAUSED) → fails, state is now PAUSED
-Thread 2: Returns false, caller knows pause already in progress
+if (!uploadSemaphore.tryAcquire()) {
+    return UploadResult.Busy(uploadId, retryAfterMs = 300)
+}
 ```
 
-#### 4. Why Offset Validation?
+**Behavior**: Server returns Busy immediately. Browser implements exponential backoff (200ms → 400ms → 800ms... max 3s).
 
-Prevents duplicate bytes and data corruption on resume:
+### Browser Queue
+
+```javascript
+class UploadQueueManager {
+    maxParallel = 3        // Match server limit
+    active = 0
+    queue = []
+    
+    async performUpload(item) {
+        let backoff = 200
+        while (attempts < 20) {
+            const status = await fetchStatus()
+            if (status.isBusy) {
+                await sleep(backoff)
+                backoff = Math.min(backoff * 2, 3000)
+                continue
+            }
+            // ... upload chunk
+        }
+    }
+}
+```
+
+---
+
+## Pause and Resume Design
+
+### Pause (Target: < 200ms)
+
+```kotlin
+// Phone triggers pause
+scheduler.pause(uploadId)
+
+// Server side
+stateManager.transition(uploadId, UploadState.PAUSING)
+activeJobs[uploadId]?.cancel()  // Cancel coroutine
+
+// In upload loop
+catch (e: CancellationException) {
+    stateManager.transition(uploadId, UploadState.PAUSED)
+    return UploadResult.Paused(uploadId, bytesReceived)
+}
+```
+
+**Key**: Small 8KB buffer + `ensureActive()` checks after every chunk = instant cancellation.
+
+### Resume (Target: < 300ms)
+
+```kotlin
+// Phone triggers resume
+scheduler.resume(uploadId)
+
+// Server sets deadline
+resumeDeadlines[uploadId] = System.currentTimeMillis() + 5000
+stateManager.transition(uploadId, UploadState.RESUMING)
+
+// Browser immediately POSTs
+// Server validates and transitions to UPLOADING
+```
+
+---
+
+## Multi-File Upload Queue
+
+### Browser Queue Architecture
 
 ```
-Browser claims: "I've sent 1000 bytes already"
-Server checks: "File on disk has 800 bytes"
-Result: Mismatch! Browser's offset is wrong.
-Action: Return 409 CONFLICT with actual disk size.
-Browser: Restart upload from byte 800.
+UploadQueueManager (maxParallel = 3)
+    │
+    ├── Item A (uploading)
+    ├── Item B (uploading)
+    ├── Item C (uploading)
+    │
+    └── Queue: [Item D, Item E, ...]
+
+User Actions:
+    - Pause Item B: aborts XHR, moves to paused list
+    - Resume Item B: re-enters queue, starts when slot available
+    - Pause All: aborts all XHRs, sets global pause flag
+    - Resume All: clears flag, requeues all paused items
 ```
 
-Tech Stack & Best Practices
----------------------------
+### Queue State SSE Events
 
-| Component | Technology |
-|-------------|------------|
-| **Language** | 100% Kotlin with Coroutines and Flows |
-| **UI** | Jetpack Compose with Immutable Collections (`kotlinx-collections-immutable`) |
-| **Architecture** | Multi-module Clean Architecture + MVI |
-| **DI** | Hilt (Dagger) |
-| **HTTP Server** | Ktor (CIO engine) |
-| **Storage** | MediaStore (default) + SAF (optional) |
-| **Minimum SDK** | 31 (Android 12) |
-| **Target SDK** | 36 (Android 16 Preview) |
+```json
+{
+  "type": "queue",
+  "isPaused": false,
+  "active": 3,
+  "queued": 2,
+  "paused": 1
+}
+```
 
-What Works Today
-----------------
+---
 
-- **Instant Start**: Launch, grant permissions, and start sharing immediately using the default "AirBridge" folder.
-- **Parallel Processing**: Browser can push multiple large files at once; the phone UI tracks each one individually in real-time.
-- **Resumable Transfers**: Start an upload, pause it from either side, or even close the browser—re-opening and selecting the same file will resume exactly from the last byte.
-- **Full Control**: Independent Pause/Play and Cancel buttons for every file in the transfer list.
-- **Secure by Design**: Token-based authentication and LAN-only access ensure your data stays private and local.
+## Direct Append Storage Model
 
-Build & Run
------------
+### Strategy
 
-- **IDE**: Android Studio (Ladybug or newer)
-- **JDK**: 17+
-- **Min SDK**: 31 (Android 12)
-- **Target SDK**: 36 (Android 16 Preview)
+Files are written directly to final filename — no `.part` temporary files.
 
-1. **Sync**: `./gradlew :app:assembleDebug`
-2. **Run**: Deploy to any physical device on your local Wi-Fi.
-3. **Connect**: Tap "Start Server," scan the QR code on your computer, and start sharing.
+**Pros:**
+- Simpler state management
+- Immediate visibility in file managers
+- Resume naturally works from existing file
 
-Security Notes
---------------
+**Cons:**
+- Cancel must delete incomplete file
+- External modification during upload = error
 
-- **Local Only**: All traffic is restricted to your local network. The app rejects requests from outside the LAN (192.168.x.x, 10.x.x.x, 172.16-31.x.x ranges).
-- **Session Auth**: Every connection requires a unique, randomly generated session token created during QR code pairing.
-- **No Cloud**: Your files never touch a server outside your own device and computer. All transfers are peer-to-peer over your Wi-Fi.
+### Offset Validation (Critical)
 
-Known Issues
-------------
+```kotlin
+val diskSize = storageRepository
+    .findFileByName(request.path, request.fileName)
+    .getOrNull()?.size ?: 0L
 
-- **Bidirectional Pause/Resume Timing**: When pausing from one device (browser or phone) and attempting to resume from the other, there can be a 2-4 second delay before the sync loop detects the state change. During this window, clicking resume may not respond. Wait for the status indicator to update before clicking resume.
+if (request.offset != diskSize) {
+    return UploadResult.Failure.OffsetMismatch(
+        uploadId = uploadId,
+        bytesReceived = diskSize,
+        expectedOffset = request.offset,
+        actualDiskSize = diskSize
+    )
+}
+```
 
-- **Large File Progress**: For files >100MB, the progress bar may appear to stall at 99% briefly while the final buffer is flushed. This is normal and the transfer will complete.
+**Without this**: Duplicate bytes, file corruption.
 
-- **Network Interruptions**: If Wi-Fi disconnects during upload, the transfer will show "Error" rather than "Interrupted". You can still resume by selecting the same file again.
+### Cancellable Streaming
+
+```kotlin
+private suspend fun InputStream.copyToCancellable(
+    out: OutputStream,
+    bufferSize: Int = 8 * 1024,  // Small for quick cancellation
+    onProgress: (Long) -> Unit
+) {
+    val buffer = ByteArray(bufferSize)
+    while (true) {
+        ensureActive()  // Check cancellation before read
+        
+        val bytesRead = read(buffer)
+        if (bytesRead < 0) break
+        
+        out.write(buffer, 0, bytesRead)
+        onProgress(bytesRead)
+        
+        ensureActive()  // Check cancellation after write
+    }
+}
+```
+
+---
+
+## Control Plane vs Data Plane
+
+### Separation
+
+| Control Plane | Data Plane |
+|---------------|------------|
+| Pause / Resume | POST /upload streaming |
+| Cancel | Raw byte transfer |
+| Status queries | Offset validation |
+| SSE events | File I/O |
+
+### Why This Matters
+
+Future upgrades can swap out data plane without touching control logic:
+
+- **Chunked multipart**: Replace single POST with multi-chunk protocol
+- **Encryption layer**: Wrap OutputStream with CipherOutputStream
+- **WebSocket control**: Replace SSE with WebSocket signaling
+- **Compression**: Add Deflater between source and sink
+
+---
+
+## Observability
+
+### Metrics Endpoint
+
+```bash
+GET /api/metrics?token=<session>
+```
+
+Response:
+```json
+{
+  "timestamp": 1703123456789,
+  "uploads": {
+    "total": 5,
+    "active": 2,
+    "paused": 1,
+    "queued": 1,
+    "completed": 1,
+    "error": 0
+  },
+  "throughput": {
+    "avgBytesPerSecond": 5242880,
+    "avgMBps": 5.0
+  },
+  "protocol": "v2.1-failfast"
+}
+```
+
+### Browser Debug Mode
+
+Enable in browser console:
+```javascript
+window.DEBUG_UPLOAD = true
+```
+
+Logs to console:
+```
+[QUEUE] Added upload-123 (file.zip), queue length: 1
+[UPLOAD] upload-123 - Fetching status (attempt 1)
+[UPLOAD] upload-123 - Server busy, backing off 200ms
+[SSE] Received: {type: "upload", state: "paused"}
+```
+
+---
+
+## Production Guarantees
+
+| Guarantee | Mechanism |
+|-----------|-----------|
+| No duplicate bytes | Strict offset validation |
+| No concurrent writes | File-level mutex |
+| Deterministic resume | POST-driven protocol with 5s deadline |
+| No deadlocks | Fail-fast locking, browser retry |
+| Instant pause | 8KB buffer + ensureActive() checks |
+| Safe parallel uploads | Semaphore limiting + per-file locking |
+| Crash-safe | Disk size is source of truth |
+
+---
+
+## Future Extension Points
+
+| Feature | Extension Point |
+|---------|-----------------|
+| Chunked multipart | Replace `performUpload` with chunk upload loop |
+| Encryption | Add `EncryptionRepository` wrapping StorageRepository |
+| Integrity verification | SHA-256 checksum after completion |
+| Background sync | Persist queue to SQLite, resume on boot |
+| Priority scheduling | Queue.sort() by priority score |
+| Cloud relay mode | Replace Ktor with WebSocket tunnel |
+
+---
+
+## Module Structure
+
+```
+app/                          # Application entry point
+├── feature/dashboard/        # Server control, upload list UI
+├── feature/filebrowser/      # Local file management
+└── feature/permissions/      # Storage permission handling
+
+core/
+├── network/                  # HTTP server, upload engine
+│   ├── ktor/routes/          # HTTP endpoint definitions
+│   └── upload/               # UploadScheduler, UploadQueueManager
+├── storage/                  # FileRepository, SAF/MediaStore
+├── service/                  # Foreground service + WakeLock
+└── common/                   # Logging, MVI framework
+
+domain/                       # Pure Kotlin business logic
+├── model/                    # UploadState, UploadResult, entities
+├── repository/               # Repository interfaces
+└── usecase/                  # UploadStateManager
+
+web/                          # Browser UI
+└── src/main/assets/
+    └── index.html            # UploadQueueManager (JS), SSE client
+```
+
+---
+
+## Build & Run
+
+**Requirements:**
+- Android Studio Ladybug+
+- JDK 17+
+- Min SDK: 31 (Android 12)
+- Target SDK: 36 (Android 16)
+
+**Steps:**
+1. Clone repository
+2. Open in Android Studio
+3. Sync: `./gradlew :app:assembleDebug`
+4. Deploy to physical device (emulator lacks Wi-Fi LAN)
+5. Tap "Start Server"
+6. Scan QR code from browser on same Wi-Fi network
+
+---
+
+## Security
+
+| Layer | Protection |
+|-------|------------|
+| Network | LAN-only (RFC1918 IPs only) |
+| Session | Random UUID token, QR-based pairing |
+| Transport | HTTP over local Wi-Fi (TLS not needed for LAN) |
+| Storage | Android sandbox + SAF permissions |
+
+---
+
+## License
+
+[Your License Here]
+
+---
+
+## Architecture Document Version
+
+- Protocol: v2.1-failfast
+- Document: 1.0
+- Last Updated: 2026-03-02

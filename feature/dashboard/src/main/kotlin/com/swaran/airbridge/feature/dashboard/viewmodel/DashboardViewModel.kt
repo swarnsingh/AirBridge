@@ -10,8 +10,8 @@ import com.swaran.airbridge.core.network.upload.UploadQueueManager
 import com.swaran.airbridge.core.service.ServerPreferences
 import com.swaran.airbridge.core.service.mdns.AirBridgeMdnsService
 import com.swaran.airbridge.domain.model.ServerStatus
-import com.swaran.airbridge.domain.model.TransferStatus
 import com.swaran.airbridge.domain.model.UploadRequest
+import com.swaran.airbridge.domain.model.UploadState
 import com.swaran.airbridge.domain.model.UploadStatus
 import com.swaran.airbridge.domain.repository.StorageAccessManager
 import com.swaran.airbridge.domain.usecase.GenerateQrCodeUseCase
@@ -237,23 +237,19 @@ class DashboardViewModel @Inject constructor(
                 .coerceIn(0, 100)
         } else 0
 
-        val mappedStatus = when (state) {
-            com.swaran.airbridge.domain.model.UploadState.UPLOADING -> TransferStatus.UPLOADING.value
-            com.swaran.airbridge.domain.model.UploadState.PAUSED -> TransferStatus.PAUSED.value
-            com.swaran.airbridge.domain.model.UploadState.COMPLETED -> TransferStatus.COMPLETED.value
-            com.swaran.airbridge.domain.model.UploadState.CANCELLED -> TransferStatus.CANCELLED.value
-            com.swaran.airbridge.domain.model.UploadState.ERROR -> TransferStatus.ERROR.value
-            else -> TransferStatus.UPLOADING.value
-        }
+        val mappedStatus = state.value
         
         // Log button state visibility (throttled: only log on 25% milestones or state change)
-        val buttonState = when (mappedStatus) {
-            TransferStatus.UPLOADING.value -> "[PAUSE][CANCEL]"
-            TransferStatus.PAUSED.value -> "[RESUME][CANCEL]"
-            TransferStatus.COMPLETED.value -> "[DONE]"
-            TransferStatus.CANCELLED.value -> "[CANCELLED]"
-            TransferStatus.ERROR.value -> "[RETRY][CANCEL]"
-            else -> "[UNKNOWN]"
+        val buttonState = when (state) {
+            UploadState.UPLOADING,
+            UploadState.PAUSING -> "[PAUSE][CANCEL]"
+            UploadState.PAUSED,
+            UploadState.RESUMING -> "[RESUME][CANCEL]"
+            UploadState.NONE,
+            UploadState.QUEUED -> "[CANCEL]"
+            UploadState.COMPLETED -> "[DONE]"
+            UploadState.CANCELLED -> "[CANCELLED]"
+            UploadState.ERROR -> "[RETRY][CANCEL]"
         }
         val lastLogged = lastLoggedPercent.getOrDefault(metadata.uploadId, -1)
         val milestones = setOf(0, 25, 50, 75, 100)

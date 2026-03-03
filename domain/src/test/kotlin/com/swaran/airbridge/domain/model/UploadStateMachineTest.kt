@@ -4,100 +4,126 @@ import org.junit.Assert.*
 import org.junit.Test
 
 /**
- * Unit tests for UploadState machine transitions.
+ * Unit tests for UploadState state machine transitions - Protocol v2.1
  *
  * Tests verify that state transitions follow the defined rules:
  * - Invalid transitions return false
  * - Valid transitions return true
- * - Terminal states have no outgoing transitions
+ * - Terminal states have no outgoing transitions (COMPLETED, CANCELLED, ERROR)
+ * - All 9 states are correctly defined with their string values
  */
 class UploadStateMachineTest {
 
     @Test
-    fun `queued can transition to uploading or cancelled`() {
+    fun `state values are correctly defined`() {
+        assertEquals("none", UploadState.NONE.value)
+        assertEquals("queued", UploadState.QUEUED.value)
+        assertEquals("resuming", UploadState.RESUMING.value)
+        assertEquals("uploading", UploadState.UPLOADING.value)
+        assertEquals("pausing", UploadState.PAUSING.value)
+        assertEquals("paused", UploadState.PAUSED.value)
+        assertEquals("completed", UploadState.COMPLETED.value)
+        assertEquals("cancelled", UploadState.CANCELLED.value)
+        assertEquals("error", UploadState.ERROR.value)
+    }
+
+    @Test
+    fun `none can transition to queued, uploading, or cancelled`() {
+        assertTrue(UploadState.NONE.canTransitionTo(UploadState.QUEUED))
+        assertTrue(UploadState.NONE.canTransitionTo(UploadState.UPLOADING))
+        assertTrue(UploadState.NONE.canTransitionTo(UploadState.CANCELLED))
+        assertFalse(UploadState.NONE.canTransitionTo(UploadState.PAUSED))
+    }
+
+    @Test
+    fun `queued can transition to resuming, uploading, or cancelled`() {
+        assertTrue(UploadState.QUEUED.canTransitionTo(UploadState.RESUMING))
         assertTrue(UploadState.QUEUED.canTransitionTo(UploadState.UPLOADING))
         assertTrue(UploadState.QUEUED.canTransitionTo(UploadState.CANCELLED))
         assertFalse(UploadState.QUEUED.canTransitionTo(UploadState.PAUSED))
+        assertFalse(UploadState.QUEUED.canTransitionTo(UploadState.COMPLETED))
     }
 
     @Test
-    fun `uploading can transition to multiple states`() {
+    fun `resuming can transition to uploading, paused, or cancelled`() {
+        assertTrue(UploadState.RESUMING.canTransitionTo(UploadState.UPLOADING))
+        assertTrue(UploadState.RESUMING.canTransitionTo(UploadState.PAUSED))
+        assertTrue(UploadState.RESUMING.canTransitionTo(UploadState.CANCELLED))
+        assertFalse(UploadState.RESUMING.canTransitionTo(UploadState.QUEUED))
+        assertFalse(UploadState.RESUMING.canTransitionTo(UploadState.COMPLETED))
+    }
+
+    @Test
+    fun `uploading can transition to pausing, paused, completed, cancelled, or error`() {
         assertTrue(UploadState.UPLOADING.canTransitionTo(UploadState.PAUSING))
+        assertTrue(UploadState.UPLOADING.canTransitionTo(UploadState.PAUSED))
         assertTrue(UploadState.UPLOADING.canTransitionTo(UploadState.COMPLETED))
         assertTrue(UploadState.UPLOADING.canTransitionTo(UploadState.CANCELLED))
-        assertTrue(UploadState.UPLOADING.canTransitionTo(UploadState.ERROR_RETRYABLE))
-        assertTrue(UploadState.UPLOADING.canTransitionTo(UploadState.ERROR_PERMANENT))
-        
+        assertTrue(UploadState.UPLOADING.canTransitionTo(UploadState.ERROR))
         assertFalse(UploadState.UPLOADING.canTransitionTo(UploadState.QUEUED))
-        assertFalse(UploadState.UPLOADING.canTransitionTo(UploadState.UPLOADING))
+        assertFalse(UploadState.UPLOADING.canTransitionTo(UploadState.RESUMING))
     }
 
     @Test
-    fun `pausing can transition to paused or cancelled`() {
+    fun `pausing can transition to paused, cancelled, or error`() {
         assertTrue(UploadState.PAUSING.canTransitionTo(UploadState.PAUSED))
         assertTrue(UploadState.PAUSING.canTransitionTo(UploadState.CANCELLED))
-        assertTrue(UploadState.PAUSING.canTransitionTo(UploadState.ERROR_RETRYABLE))
-        
+        assertTrue(UploadState.PAUSING.canTransitionTo(UploadState.ERROR))
         assertFalse(UploadState.PAUSING.canTransitionTo(UploadState.UPLOADING))
+        assertFalse(UploadState.PAUSING.canTransitionTo(UploadState.RESUMING))
     }
 
     @Test
     fun `paused can transition to resuming or cancelled`() {
         assertTrue(UploadState.PAUSED.canTransitionTo(UploadState.RESUMING))
         assertTrue(UploadState.PAUSED.canTransitionTo(UploadState.CANCELLED))
-        
         assertFalse(UploadState.PAUSED.canTransitionTo(UploadState.UPLOADING))
         assertFalse(UploadState.PAUSED.canTransitionTo(UploadState.PAUSING))
-    }
-
-    @Test
-    fun `resuming can transition to uploading or error`() {
-        assertTrue(UploadState.RESUMING.canTransitionTo(UploadState.UPLOADING))
-        assertTrue(UploadState.RESUMING.canTransitionTo(UploadState.ERROR_RETRYABLE))
-        assertTrue(UploadState.RESUMING.canTransitionTo(UploadState.CANCELLED))
-        
-        assertFalse(UploadState.RESUMING.canTransitionTo(UploadState.PAUSED))
+        assertFalse(UploadState.PAUSED.canTransitionTo(UploadState.COMPLETED))
     }
 
     @Test
     fun `completed is terminal - no transitions allowed`() {
         assertFalse(UploadState.COMPLETED.canTransitionTo(UploadState.UPLOADING))
         assertFalse(UploadState.COMPLETED.canTransitionTo(UploadState.PAUSED))
+        assertFalse(UploadState.COMPLETED.canTransitionTo(UploadState.RESUMING))
         assertFalse(UploadState.COMPLETED.canTransitionTo(UploadState.CANCELLED))
-        assertFalse(UploadState.COMPLETED.canTransitionTo(UploadState.ERROR_RETRYABLE))
-        
-        assertTrue(UploadState.COMPLETED.isTerminal())
+        assertTrue(UploadState.COMPLETED.isTerminal)
     }
 
     @Test
     fun `cancelled is terminal - no transitions allowed`() {
         assertFalse(UploadState.CANCELLED.canTransitionTo(UploadState.UPLOADING))
         assertFalse(UploadState.CANCELLED.canTransitionTo(UploadState.PAUSED))
-        
-        assertTrue(UploadState.CANCELLED.isTerminal())
+        assertFalse(UploadState.CANCELLED.canTransitionTo(UploadState.QUEUED))
+        assertTrue(UploadState.CANCELLED.isTerminal)
     }
 
     @Test
-    fun `error_permanent is terminal - no transitions allowed`() {
-        assertFalse(UploadState.ERROR_PERMANENT.canTransitionTo(UploadState.UPLOADING))
-        assertFalse(UploadState.ERROR_PERMANENT.canTransitionTo(UploadState.QUEUED))
-        
-        assertTrue(UploadState.ERROR_PERMANENT.isTerminal())
+    fun `error is terminal - no transitions allowed`() {
+        assertFalse(UploadState.ERROR.canTransitionTo(UploadState.UPLOADING))
+        assertFalse(UploadState.ERROR.canTransitionTo(UploadState.PAUSED))
+        assertFalse(UploadState.ERROR.canTransitionTo(UploadState.QUEUED))
+        assertTrue(UploadState.ERROR.isTerminal)
     }
 
     @Test
-    fun `error_retryable can be retried via queued`() {
-        assertTrue(UploadState.ERROR_RETRYABLE.canTransitionTo(UploadState.QUEUED))
-        assertTrue(UploadState.ERROR_RETRYABLE.canTransitionTo(UploadState.CANCELLED))
-        
-        assertFalse(UploadState.ERROR_RETRYABLE.canTransitionTo(UploadState.UPLOADING))
-        assertFalse(UploadState.ERROR_RETRYABLE.isTerminal())
+    fun `same state transition always allowed`() {
+        // All states can "transition" to themselves (idempotent)
+        UploadState.entries.forEach { state ->
+            assertTrue("$state should allow transition to itself", 
+                state.canTransitionTo(state))
+        }
     }
 
     @Test
-    fun `full upload lifecycle transitions`() {
+    fun `full upload lifecycle - success`() {
         // Simulate a successful upload lifecycle
-        var state = UploadState.QUEUED
+        var state = UploadState.NONE
+        
+        // NONE -> QUEUED
+        assertTrue(state.canTransitionTo(UploadState.QUEUED))
+        state = UploadState.QUEUED
         
         // QUEUED -> UPLOADING
         assertTrue(state.canTransitionTo(UploadState.UPLOADING))
@@ -108,79 +134,91 @@ class UploadStateMachineTest {
         state = UploadState.COMPLETED
         
         // Terminal - no more transitions
-        assertTrue(state.isTerminal())
+        assertTrue(state.isTerminal)
     }
 
     @Test
-    fun `pause resume lifecycle transitions`() {
-        var state = UploadState.UPLOADING
+    fun `full upload lifecycle - with pause and resume`() {
+        var state = UploadState.NONE
         
-        // UPLOADING -> PAUSING
-        assertTrue(state.canTransitionTo(UploadState.PAUSING))
-        state = UploadState.PAUSING
-        
-        // PAUSING -> PAUSED
-        assertTrue(state.canTransitionTo(UploadState.PAUSED))
-        state = UploadState.PAUSED
-        
-        // PAUSED -> RESUMING
-        assertTrue(state.canTransitionTo(UploadState.RESUMING))
-        state = UploadState.RESUMING
-        
-        // RESUMING -> UPLOADING
-        assertTrue(state.canTransitionTo(UploadState.UPLOADING))
-        state = UploadState.UPLOADING
-        
-        // UPLOADING -> COMPLETED
-        assertTrue(state.canTransitionTo(UploadState.COMPLETED))
-    }
-
-    @Test
-    fun `error recovery lifecycle`() {
-        var state = UploadState.UPLOADING
-        
-        // UPLOADING encounters error
-        assertTrue(state.canTransitionTo(UploadState.ERROR_RETRYABLE))
-        state = UploadState.ERROR_RETRYABLE
-        
-        // Retry: ERROR_RETRYABLE -> QUEUED
+        // Start
         assertTrue(state.canTransitionTo(UploadState.QUEUED))
         state = UploadState.QUEUED
         
-        // Start again
         assertTrue(state.canTransitionTo(UploadState.UPLOADING))
+        state = UploadState.UPLOADING
+        
+        // Pause
+        assertTrue(state.canTransitionTo(UploadState.PAUSING))
+        state = UploadState.PAUSING
+        
+        assertTrue(state.canTransitionTo(UploadState.PAUSED))
+        state = UploadState.PAUSED
+        
+        // Resume
+        assertTrue(state.canTransitionTo(UploadState.RESUMING))
+        state = UploadState.RESUMING
+        
+        assertTrue(state.canTransitionTo(UploadState.UPLOADING))
+        state = UploadState.UPLOADING
+        
+        // Complete
+        assertTrue(state.canTransitionTo(UploadState.COMPLETED))
+        state = UploadState.COMPLETED
+        
+        assertTrue(state.isTerminal)
     }
 
     @Test
-    fun `all terminal states are correctly identified`() {
-        val terminalStates = listOf(
-            UploadState.COMPLETED,
-            UploadState.CANCELLED,
-            UploadState.ERROR_PERMANENT
-        )
+    fun `upload lifecycle - cancelled`() {
+        var state = UploadState.UPLOADING
         
-        val nonTerminalStates = listOf(
-            UploadState.QUEUED,
-            UploadState.UPLOADING,
-            UploadState.PAUSING,
-            UploadState.PAUSED,
-            UploadState.RESUMING,
-            UploadState.ERROR_RETRYABLE
-        )
+        // Cancel from uploading
+        assertTrue(state.canTransitionTo(UploadState.CANCELLED))
+        state = UploadState.CANCELLED
         
-        terminalStates.forEach { state ->
-            assertTrue("$state should be terminal", state.isTerminal())
-        }
+        assertTrue(state.isTerminal)
+    }
+
+    @Test
+    fun `upload lifecycle - error`() {
+        var state = UploadState.UPLOADING
         
-        nonTerminalStates.forEach { state ->
-            assertFalse("$state should not be terminal", state.isTerminal())
+        // Error during upload
+        assertTrue(state.canTransitionTo(UploadState.ERROR))
+        state = UploadState.ERROR
+        
+        assertTrue(state.isTerminal)
+    }
+
+    @Test
+    fun `terminal states list is correct`() {
+        val terminalStates = UploadState.entries.filter { it.isTerminal }
+        
+        assertEquals(3, terminalStates.size)
+        assertTrue(terminalStates.contains(UploadState.COMPLETED))
+        assertTrue(terminalStates.contains(UploadState.CANCELLED))
+        assertTrue(terminalStates.contains(UploadState.ERROR))
+    }
+
+    @Test
+    fun `non-terminal states list is correct`() {
+        val nonTerminalStates = UploadState.entries.filter { !it.isTerminal }
+        
+        assertEquals(6, nonTerminalStates.size)
+        assertTrue(nonTerminalStates.contains(UploadState.NONE))
+        assertTrue(nonTerminalStates.contains(UploadState.QUEUED))
+        assertTrue(nonTerminalStates.contains(UploadState.RESUMING))
+        assertTrue(nonTerminalStates.contains(UploadState.UPLOADING))
+        assertTrue(nonTerminalStates.contains(UploadState.PAUSING))
+        assertTrue(nonTerminalStates.contains(UploadState.PAUSED))
+    }
+
+    @Test
+    fun `all states have non-empty string values`() {
+        UploadState.entries.forEach { state ->
+            assertTrue("$state should have non-empty value", 
+                state.value.isNotBlank())
         }
     }
-}
-
-/**
- * Extension function for terminal state check (mirrors UploadStatus implementation)
- */
-private fun UploadState.isTerminal(): Boolean {
-    return this in setOf(UploadState.COMPLETED, UploadState.CANCELLED, UploadState.ERROR_PERMANENT)
 }

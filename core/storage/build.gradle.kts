@@ -31,4 +31,9 @@ dependencies {
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.timber)
     ksp(libs.hilt.ksp)
+
+    // Testing
+    testImplementation(libs.junit)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.test.core)
 }
