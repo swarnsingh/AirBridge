@@ -86,6 +86,7 @@ class UploadRoutes @Inject constructor(
                 put("exists", status.exists)
                 put("bytesReceived", status.bytesReceived)
                 put("status", status.state)
+                put("state", status.state) // compatibility for clients expecting `state`
                 put("canResume", status.canResume)
                 put("isBusy", status.isBusy)
             })
@@ -333,10 +334,20 @@ class UploadRoutes @Inject constructor(
             val uploadId = call.request.queryParameters[QueryParams.UPLOAD_ID]
                 ?: return@post call.respond(HttpStatusCode.BadRequest, errorJson("Missing uploadId"))
 
-            queueManager.resume(uploadId)
+            val accepted = queueManager.resume(uploadId)
+            if (!accepted) {
+                return@post call.respondNoCache(HttpStatusCode.Conflict, buildJsonObject {
+                    put(ResponseFields.SUCCESS, false)
+                    put(ResponseFields.UPLOAD_ID, uploadId)
+                    put("error", "invalid_state")
+                    put("message", "Upload is not paused; cannot resume")
+                })
+            }
 
             call.respondNoCache(HttpStatusCode.OK, buildJsonObject {
                 put(ResponseFields.SUCCESS, true)
+                put(ResponseFields.UPLOAD_ID, uploadId)
+                put("state", "resuming")
                 put("message", "Resume requested - browser will POST from disk offset")
             })
         }
