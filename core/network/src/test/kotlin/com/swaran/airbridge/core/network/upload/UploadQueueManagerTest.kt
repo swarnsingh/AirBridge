@@ -84,6 +84,33 @@ class UploadQueueManagerTest {
         assertEquals(UploadState.RESUMING, stateManager.getStatus(uploadId)?.state)
     }
 
+
+    @Test
+    fun `resume returns true when paused`() {
+        val uploadId = "resume-bool-true"
+        stateManager.initialize(createMetadata(uploadId))
+        stateManager.transition(uploadId, UploadState.UPLOADING)
+        stateManager.transition(uploadId, UploadState.PAUSING)
+        stateManager.transition(uploadId, UploadState.PAUSED)
+
+        val accepted = queueManager.resume(uploadId)
+
+        assertTrue(accepted)
+        assertEquals(UploadState.RESUMING, stateManager.getStatus(uploadId)?.state)
+    }
+
+    @Test
+    fun `resume returns false when not paused`() {
+        val uploadId = "resume-bool-false"
+        stateManager.initialize(createMetadata(uploadId))
+        stateManager.transition(uploadId, UploadState.UPLOADING)
+
+        val accepted = queueManager.resume(uploadId)
+
+        assertFalse(accepted)
+        assertEquals(UploadState.UPLOADING, stateManager.getStatus(uploadId)?.state)
+    }
+
     @Test
     fun `pauseAll sets global pause flag`() {
         queueManager.pauseAll()

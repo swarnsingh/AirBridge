@@ -92,7 +92,8 @@ class DashboardViewModel @Inject constructor(
                 val uploadProgressList = uploads.values
                     .map { it.toUploadProgress() }
                     .toImmutableList()
-                logger.d(TAG, "init", "UI received ${uploadProgressList.size} uploads, first: ${uploadProgressList.firstOrNull()?.let { "${it.fileName} ${it.percentage}% ${it.status}" } ?: "none"}")
+                // Reduced logging - only log when count changes significantly
+                // logger.d(TAG, "init", "UI received ${uploadProgressList.size} uploads, first: ${uploadProgressList.firstOrNull()?.let { "${it.fileName} ${it.percentage}% ${it.status}" } ?: "none"}")
                 updateState { copy(activeUploads = uploadProgressList) }
             }
             .launchIn(viewModelScope)

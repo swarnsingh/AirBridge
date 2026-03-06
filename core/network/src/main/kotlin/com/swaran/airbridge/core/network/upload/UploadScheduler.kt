@@ -21,6 +21,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
+import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicReference
 import javax.inject.Inject
@@ -212,24 +213,7 @@ class UploadScheduler @Inject constructor(
         val uploadId = request.uploadId
         var bytesReceived = request.offset
 
-        // 1️⃣ Validate offset against disk (source of truth)
-        val diskFile = storageRepository
-            .findFileByName(request.path, request.fileName)
-            .getOrNull()
-
-        val diskSize = diskFile?.size ?: 0L
-
-        if (request.offset != diskSize) {
-            logger.w(TAG, "performUpload", "[$uploadId] Offset mismatch: expected=${request.offset}, disk=$diskSize")
-            return UploadResult.Failure.OffsetMismatch(
-                uploadId = uploadId,
-                bytesReceived = diskSize,
-                expectedOffset = request.offset,
-                actualDiskSize = diskSize
-            )
-        }
-
-        // 2️⃣ Initialize metadata if new upload
+        // 1️⃣ ALWAYS initialize metadata first - ensures queryStatus can find this upload
         val metadata = UploadMetadata(
             uploadId = uploadId,
             fileUri = request.fileUri,
@@ -238,6 +222,25 @@ class UploadScheduler @Inject constructor(
             totalBytes = request.totalBytes
         )
         stateManager.initialize(metadata)
+
+        // 2️⃣ Validate offset against disk (source of truth)
+        val diskFile = storageRepository
+            .findFileByName(request.path, request.fileName)
+            .getOrNull()
+
+        val diskSize = diskFile?.size ?: 0L
+
+        if (request.offset != diskSize) {
+            logger.w(TAG, "performUpload", "[$uploadId] Offset mismatch: expected=${request.offset}, disk=$diskSize")
+            // Initialize in stateManager so queryStatus can return correct disk size
+            stateManager.updateProgress(uploadId, diskSize)
+            return UploadResult.Failure.OffsetMismatch(
+                uploadId = uploadId,
+                bytesReceived = diskSize,
+                expectedOffset = request.offset,
+                actualDiskSize = diskSize
+            )
+        }
 
         // 3️⃣ Transition to UPLOADING
         val allowed = stateManager.transition(uploadId, UploadState.UPLOADING)
@@ -378,14 +381,14 @@ class UploadScheduler @Inject constructor(
      * Browser should POST within deadline or server reverts to PAUSED.
      * Deadline is cancelled when browser successfully POSTs.
      */
-    fun resume(uploadId: String) {
-        val status = stateManager.getStatus(uploadId)
-        if (status?.state != UploadState.PAUSED) {
-            logger.w(TAG, "resume", "[$uploadId] Cannot resume from state ${status?.state}")
-            return
+    fun resume(uploadId: String): Boolean {
+        // Atomic transition check+set avoids TOCTOU between read and transition
+        val transitioned = stateManager.transition(uploadId, UploadState.RESUMING)
+        if (!transitioned) {
+            logger.w(TAG, "resume", "[$uploadId] Cannot resume from state ${stateManager.getStatus(uploadId)?.state}")
+            return false
         }
 
-        stateManager.transition(uploadId, UploadState.RESUMING)
         logger.d(TAG, "resume", "[$uploadId] Set RESUMING, 30s deadline started")
 
         // Deadline: revert to PAUSED if browser never POSTs
@@ -398,6 +401,7 @@ class UploadScheduler @Inject constructor(
             }
         }
         resumeDeadlines[uploadId] = deadlineJob
+        return true
     }
 
     /**
@@ -442,13 +446,28 @@ class UploadScheduler @Inject constructor(
     }
 
     /**
-     * Query status. Disk size is source of truth.
+     * Query status. Disk size is source of truth, but memory state takes precedence
+     * for active uploads to handle in-flight bytes not yet flushed to disk.
      */
     suspend fun queryStatus(path: String, fileName: String, uploadId: String?): UploadQueryResult {
+        // Always try to find the file on disk first
         val diskFile = storageRepository.findFileByName(path, fileName).getOrNull()
         val diskSize = diskFile?.size ?: 0L
+
+        // Get memory state if uploadId provided
         val memState = uploadId?.let { stateManager.getStatus(it) }
 
+        // Determine bytes received:
+        // 1. If memory state exists and has bytes, use the larger of mem/disk
+        // 2. If upload exists in stateManager but file not on disk, use memState bytes
+        // 3. Otherwise use disk size
+        val bytesReceived = when {
+            memState != null && memState.bytesReceived > diskSize -> memState.bytesReceived
+            memState != null && diskSize == 0L -> memState.bytesReceived
+            else -> diskSize
+        }
+
+        // Determine state - prioritize memory state for active uploads
         val state = when (memState?.state) {
             UploadState.COMPLETED -> UploadState.COMPLETED.value
             UploadState.CANCELLED -> UploadState.CANCELLED.value
@@ -457,17 +476,32 @@ class UploadScheduler @Inject constructor(
             UploadState.RESUMING -> UploadState.RESUMING.value
             UploadState.PAUSING -> UploadState.PAUSING.value
             UploadState.PAUSED -> UploadState.PAUSED.value
-            else -> if (diskSize > 0) UploadState.PAUSED.value else UploadState.NONE.value
+            UploadState.QUEUED -> UploadState.QUEUED.value
+            UploadState.NONE -> {
+                // Fresh upload initialized but not yet transitioned - treat as uploading
+                // since metadata exists in stateManager
+                UploadState.UPLOADING.value
+            }
+            null -> {
+                // No memory state - determine from disk
+                when {
+                    diskSize > 0 -> UploadState.PAUSED.value  // File exists but no active upload
+                    else -> UploadState.NONE.value
+                }
+            }
         }
 
         // Check if busy (any session holding lock for this file)
         val isBusy = uploadId?.let { sessions[it]?.lock?.isLocked == true } ?: false
 
+        // More accurate exists check - either in memory or on disk
+        val exists = memState != null || bytesReceived > 0
+
         return UploadQueryResult(
-            exists = diskSize > 0,
-            bytesReceived = diskSize,
+            exists = exists,
+            bytesReceived = bytesReceived,
             state = state,
-            canResume = diskSize > 0 && state != "completed",
+            canResume = bytesReceived > 0 && state != "completed" && state != "cancelled" && state != "error",
             isBusy = isBusy
         )
     }

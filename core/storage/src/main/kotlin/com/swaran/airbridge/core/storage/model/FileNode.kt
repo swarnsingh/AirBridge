@@ -11,7 +11,8 @@ data class FileNode(
     val isDirectory: Boolean = false,
     val lastModified: Long = System.currentTimeMillis(),
     val uri: String = "",
-    val parentPath: String? = null
+    val parentPath: String? = null,
+    val isPending: Boolean = false  // True if file is being written (IS_PENDING = 1)
 ) {
     fun toDomain(): FileItem = FileItem(
         id = id,

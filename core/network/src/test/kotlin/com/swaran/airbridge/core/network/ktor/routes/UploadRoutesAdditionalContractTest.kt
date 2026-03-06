@@ -25,6 +25,7 @@ class UploadRoutesAdditionalContractTest {
         assertNotNull(ResponseFields.SUCCESS)
         assertNotNull(ResponseFields.UPLOAD_ID)
         assertNotNull(ResponseFields.BYTES_RECEIVED)
+        assertNotNull(ResponseFields.IS_PAUSED)
     }
 
     @Test
@@ -40,5 +41,6 @@ class UploadRoutesAdditionalContractTest {
         assertEquals("success", ResponseFields.SUCCESS)
         assertEquals("uploadId", ResponseFields.UPLOAD_ID)
         assertEquals("bytesReceived", ResponseFields.BYTES_RECEIVED)
+        assertEquals("isPaused", ResponseFields.IS_PAUSED)
     }
 }

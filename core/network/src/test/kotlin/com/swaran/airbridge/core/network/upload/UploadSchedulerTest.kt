@@ -81,6 +81,37 @@ class UploadSchedulerTest {
         assertEquals(UploadState.RESUMING, status?.state)
     }
 
+
+    @Test
+    fun `resume returns false when not paused`() {
+        val uploadId = "resume-reject-test"
+        val metadata = createMetadata(uploadId)
+        stateManager.initialize(metadata)
+        stateManager.transition(uploadId, UploadState.UPLOADING)
+
+        val accepted = scheduler.resume(uploadId)
+
+        assertFalse(accepted)
+        assertEquals(UploadState.UPLOADING, stateManager.getStatus(uploadId)?.state)
+    }
+
+    @Test
+    fun `resume accepts once then rejects duplicate while resuming`() {
+        val uploadId = "resume-duplicate-test"
+        val metadata = createMetadata(uploadId)
+        stateManager.initialize(metadata)
+        stateManager.transition(uploadId, UploadState.UPLOADING)
+        stateManager.transition(uploadId, UploadState.PAUSING)
+        stateManager.transition(uploadId, UploadState.PAUSED)
+
+        val first = scheduler.resume(uploadId)
+        val second = scheduler.resume(uploadId)
+
+        assertTrue(first)
+        assertFalse(second)
+        assertEquals(UploadState.RESUMING, stateManager.getStatus(uploadId)?.state)
+    }
+
     @Test
     fun `canResume returns true when state is PAUSED`() {
         val uploadId = "can-resume-test"
