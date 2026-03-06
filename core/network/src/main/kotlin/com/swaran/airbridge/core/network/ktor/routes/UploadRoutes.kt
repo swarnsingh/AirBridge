@@ -87,6 +87,7 @@ class UploadRoutes @Inject constructor(
             call.respondNoCache(HttpStatusCode.OK, buildJsonObject {
                 put("exists", status.exists)
                 put("bytesReceived", status.bytesReceived)
+                put("serverOffset", status.bytesReceived) // compatibility for clients that read explicit serverOffset
                 put("status", status.state)
                 put("state", status.state) // compatibility for clients expecting `state`
                 put("canResume", status.canResume)
