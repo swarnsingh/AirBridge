@@ -166,13 +166,33 @@
 
     <script>
         // ==========================================
-        // Debug Mode - Set window.DEBUG_UPLOAD = true in console
+        // Debug Mode - ENABLED for troubleshooting
         // ==========================================
-        const DEBUG_UPLOAD = window.DEBUG_UPLOAD || false;
+        const DEBUG_UPLOAD = true; // Force enable for debugging
         function debugLog(area, message, data) {
             if (!DEBUG_UPLOAD) return;
             console.log(`[${area}] ${message}`, data || '');
         }
+        
+        // Always log errors regardless of debug mode
+        function errorLog(area, message, error) {
+            console.error(`[${area}] ERROR: ${message}`, error || '');
+        }
+        
+        // Global error handler to catch silent failures
+        window.onerror = function(msg, url, line, col, error) {
+            console.error('[GLOBAL ERROR]', msg, 'at', url, 'line', line, 'col', col, error);
+            return false;
+        };
+        
+        window.addEventListener('unhandledrejection', function(event) {
+            console.error('[UNHANDLED PROMISE REJECTION]', event.reason);
+        });
+
+        // CLICK DEBUGGER - Check if button clicks register
+        document.addEventListener('click', function(e) {
+            console.log('[CLICK] Element:', e.target.tagName, 'Text:', e.target.innerText, 'Classes:', e.target.className);
+        }, true);
 
         // ==========================================
         // Theme Management
@@ -286,9 +306,13 @@
             }
 
             process() {
-                if (this.processing) return;  // Atomic guard - only one scheduler runs
+                debugLog('QUEUE', `process() - processing: ${this.processing}, paused: ${this.globalPaused}, active: ${this.active}, queue: ${this.queue.length}`);
+                if (this.processing) {
+                    debugLog('QUEUE', `process() - already running, returning`);
+                    return;
+                }
                 if (this.globalPaused) {
-                    debugLog('QUEUE', 'Global pause active, not processing');
+                    debugLog('QUEUE', `process() - global pause active, returning`);
                     return;
                 }
 
@@ -297,6 +321,7 @@
                     while (this.active < this.maxParallel && this.queue.length > 0) {
                         const next = this.dequeue();
                         if (next) {
+                            debugLog('QUEUE', `process() - starting ${next.id}`);
                             this.start(next);
                         }
                     }
@@ -353,20 +378,37 @@
 
             resume(id) {
                 const item = this.items.get(id);
-                if (!item) return false;
+                debugLog('QUEUE', `resume(${id}) called, item exists: ${!!item}`);
+                
+                if (!item) {
+                    debugLog('QUEUE', `resume(${id}) - item not found, returning false`);
+                    return false;
+                }
 
                 // Guard against stale or duplicate resume attempts
-                if (item.state === 'completed' || item.state === 'cancelled') return false;
-                if (item.state === 'uploading' && item.xhr) return false;
+                if (item.state === 'completed' || item.state === 'cancelled') {
+                    debugLog('QUEUE', `resume(${id}) - item state is ${item.state}, returning false`);
+                    return false;
+                }
+                if (item.state === 'uploading' && item.xhr) {
+                    debugLog('QUEUE', `resume(${id}) - already uploading with xhr, returning false`);
+                    return false;
+                }
 
                 debugLog('QUEUE', `Resuming ${id} from state: ${item.state}`);
                 item.state = 'queued';
                 item.isPaused = false;
 
                 // Don't add to queue if already queued
-                if (!this.queue.find(i => i.id === id)) {
+                const alreadyQueued = this.queue.find(i => i.id === id);
+                debugLog('QUEUE', `resume(${id}) - already in queue: ${!!alreadyQueued}`);
+                
+                if (!alreadyQueued) {
                     this.queue.push(item);
+                    debugLog('QUEUE', `resume(${id}) - added to queue, length: ${this.queue.length}`);
                 }
+                
+                debugLog('QUEUE', `resume(${id}) - calling process()`);
                 this.process();
                 return true;
             }
@@ -485,12 +527,24 @@
         // Never waits for server. POSTs immediately. Retries on busy.
         // ==========================================
         async function performUpload(item) {
+            debugLog('UPLOAD', `${item.id} - performUpload STARTED, state: ${item.state}`);
+            
+            // Check if we have a valid File object
+            if (!item.file || typeof item.file.slice !== 'function') {
+                debugLog('UPLOAD', `${item.id} - No valid File object (browser refresh?), cannot resume`);
+                item.state = 'error';
+                item.error = 'File selection required after browser refresh';
+                uploadQueue.updateUI();
+                return;
+            }
+            
             let backoff = 200;
             let attempts = 0;
             const maxAttempts = 20;
 
             while (attempts < maxAttempts) {
                 attempts++;
+                debugLog('UPLOAD', `${item.id} - attempt ${attempts}, state: ${item.state}`);
                 
                 // Strict check for stopped states
                 if (item.state === 'paused' || item.state === 'pausing' || item.state === 'cancelled') {
@@ -500,7 +554,7 @@
 
                 try {
                     // 1️⃣ Fetch authoritative offset from server
-                    debugLog('UPLOAD', `${item.id} - Fetching status (attempt ${attempts})`);
+                    debugLog('UPLOAD', `${item.id} - Fetching status...`);
                     const statusRes = await fetch(
                         `${serverUrl}/api/upload/status?id=${item.id}&filename=${encodeURIComponent(item.name)}&token=${token}`,
                         { signal: AbortSignal.timeout(10000) }
@@ -514,6 +568,7 @@
                     debugLog('UPLOAD', `${item.id} - Server status:`, status);
 
                     const serverState = status.state || status.status;
+                    debugLog('UPLOAD', `${item.id} - serverState: ${serverState}, item.state: ${item.state}`);
 
                     // Sync local state with server - pause from phone handling
                     if (serverState && serverState !== item.state) {
@@ -530,6 +585,7 @@
                         }
                         // PAUSED or INTERRUPTED from phone - abort XHR immediately, freeze progress
                         else if (serverState === 'paused' || serverState === 'pausing' || serverState === 'interrupted') {
+                            debugLog('UPLOAD', `${item.id} - Server paused, aborting`);
                         // CRITICAL: Abort XHR immediately to stop progress
                         if (item.xhr) {
                             item.xhr.abort();
@@ -549,6 +605,7 @@
                     }
                         
                         if (serverState === 'completed') {
+                            debugLog('UPLOAD', `${item.id} - Server says completed`);
                             item.state = 'completed';
                             item.updateProgress(item.fileSize);
                             uploadQueue.updateUI();
@@ -557,7 +614,10 @@
                     }
 
                     // Re-check local state after async call
-                    if (item.state === 'paused' || item.state === 'pausing' || item.state === 'cancelled') return;
+                    if (item.state === 'paused' || item.state === 'pausing' || item.state === 'cancelled') {
+                        debugLog('UPLOAD', `${item.id} - State changed to ${item.state} during fetch, stopping`);
+                        return;
+                    }
 
                     // Server says busy - wait and retry
                     if (status.status === 'busy' || status.isBusy) {
@@ -569,14 +629,18 @@
 
                     // Handle offset mismatch - server tells us correct offset
                     let serverOffset = status.bytesReceived || 0;
+                    debugLog('UPLOAD', `${item.id} - serverOffset: ${serverOffset}, will POST from this offset`);
                     item.updateProgress(serverOffset);
                     uploadQueue.updateUI();
 
                     // 2️⃣ Send chunk from offset (IMMEDIATE POST)
+                    debugLog('UPLOAD', `${item.id} - POSTING chunk from offset ${serverOffset}`);
                     const chunk = item.file.slice(serverOffset);
                     const result = await sendChunk(item, serverOffset, chunk);
+                    debugLog('UPLOAD', `${item.id} - POST result:`, result);
 
                     if (result.success) {
+                        debugLog('UPLOAD', `${item.id} - Upload completed`);
                         item.state = 'completed';
                         item.updateProgress(item.fileSize);
                         uploadQueue.updateUI();
@@ -593,6 +657,7 @@
                     }
 
                     if (result.paused || result.aborted) {
+                        debugLog('UPLOAD', `${item.id} - Paused/aborted:`, result);
                         // If state was changed during XHR, stop the loop
                         if (item.state === 'pausing' || item.state === 'paused' || item.isPaused) {
                             debugLog('UPLOAD', `${item.id} - Stopped after XHR abort`);
@@ -614,10 +679,12 @@
                     debugLog('UPLOAD', `${item.id} - Error: ${err.message}`);
                     
                     if (item.state === 'paused' || item.state === 'pausing' || item.state === 'cancelled' || item.isPaused) {
+                        debugLog('UPLOAD', `${item.id} - Stopped after error`);
                         return;
                     }
                     
                     // Exponential backoff on network errors
+                    debugLog('UPLOAD', `${item.id} - Backing off ${backoff}ms after error`);
                     await sleep(backoff);
                     backoff = Math.min(backoff * 2, 3000);
                 }
@@ -633,6 +700,9 @@
             return new Promise((resolve) => {
                 const xhr = new XMLHttpRequest();
                 item.xhr = xhr;
+                
+                // Start status sync polling to get server progress
+                startStatusSync(item);
 
                 xhr.open('POST', `${serverUrl}/api/upload?token=${token}&filename=${encodeURIComponent(item.name)}&id=${item.id}`);
 
@@ -666,6 +736,7 @@
 
                 xhr.onload = () => {
                     item.xhr = null;
+                    stopStatusSync(item.id); // Stop sync when done
                     
                     if (xhr.status === 200) {
                         try {
@@ -714,11 +785,13 @@
 
                 xhr.onerror = () => {
                     item.xhr = null;
+                    stopStatusSync(item.id); // Stop sync on error
                     resolve({ error: 'Network error' });
                 };
 
                 xhr.onabort = () => {
                     item.xhr = null;
+                    stopStatusSync(item.id); // Stop sync on abort
                     resolve({ aborted: true });
                 };
 
@@ -726,21 +799,163 @@
             });
         }
 
-        function sleep(ms) {
-            return new Promise(r => setTimeout(r, ms));
+        // Status sync polling - runs during upload to sync with server state
+        let statusSyncIntervals = new Map(); // uploadId -> interval
+        
+        function startStatusSync(item) {
+            if (statusSyncIntervals.has(item.id)) return; // Already syncing
+            
+            console.log(`[SYNC] Starting status sync for ${item.id}`);
+            const interval = setInterval(async () => {
+                // Stop if upload completed/cancelled
+                if (item.state === 'completed' || item.state === 'cancelled' || !item.xhr) {
+                    console.log(`[SYNC] ${item.id} - Stopping sync (state: ${item.state}, xhr: ${!!item.xhr})`);
+                    stopStatusSync(item.id);
+                    return;
+                }
+                
+                try {
+                    const response = await fetch(
+                        `${serverUrl}/api/upload/status?id=${item.id}&filename=${encodeURIComponent(item.name)}&token=${token}`,
+                        { signal: AbortSignal.timeout(3000) }
+                    );
+                    if (!response.ok) return;
+                    
+                    const status = await response.json();
+                    
+                    // Update from server authoritative bytes
+                    if (status.bytesReceived > item.serverOffset) {
+                        item.serverOffset = status.bytesReceived;
+                        // Update progress display
+                        if (item.fileSize > 0) {
+                            const serverPercent = (status.bytesReceived / item.fileSize) * 100;
+                            item.progress = Math.min(serverPercent, 99.9);
+                        }
+                        uploadQueue.updateUI();
+                    }
+                    
+                    // Sync pause state from server
+                    const serverState = status.state || status.status;
+                    
+                    // Handle RESUMING - server is ready for browser to POST
+                    if (serverState === 'resuming' && item.state === 'paused') {
+                        console.log(`[SYNC] ${item.id} - Server resuming, triggering resume`);
+                        item.state = 'resuming';
+                        item.isPaused = false;
+                        uploadQueue.updateUI();
+                        // Start upload via force poll
+                        forcePollAndUpload(item.id);
+                        return;
+                    }
+                    
+                    // Handle PAUSED/PAUSING - abort XHR
+                    if ((serverState === 'paused' || serverState === 'pausing') && !item.isPaused) {
+                        console.log(`[SYNC] ${item.id} - Server paused, aborting`);
+                        item.isPaused = true;
+                        item.state = 'paused';
+                        if (item.xhr) item.xhr.abort();
+                        uploadQueue.updateUI();
+                        stopStatusSync(item.id);
+                    }
+                    
+                } catch (e) {
+                    // Silent fail - don't break upload on sync error
+                }
+            }, 1000); // Poll every 1 second
+            
+            statusSyncIntervals.set(item.id, interval);
+        }
+        
+        function stopStatusSync(uploadId) {
+            const interval = statusSyncIntervals.get(uploadId);
+            if (interval) {
+                clearInterval(interval);
+                statusSyncIntervals.delete(uploadId);
+                console.log(`[SYNC] Stopped status sync for ${uploadId}`);
+            }
         }
 
         // ==========================================
         // SSE (Server-Sent Events) - Optimization only
         // Never gating for resume. Browser POSTs immediately.
         // ==========================================
+        
+        // FALLBACK POLLING: When SSE fails, poll every 2 seconds to check for server resume
+        let fallbackPollInterval = null;
+        
+        function startFallbackPolling() {
+            if (fallbackPollInterval) return; // Already polling
+            console.log('[FALLBACK] Starting aggressive polling (SSE failed or unreliable)');
+            
+            fallbackPollInterval = setInterval(async () => {
+                const uploads = Array.from(uploadQueue.items.values());
+                for (const item of uploads) {
+                    // Only poll items that are paused or resuming
+                    if (item.state === 'paused' || item.state === 'resuming' || item.state === 'pausing') {
+                        try {
+                            const response = await fetch(
+                                `${serverUrl}/api/upload/status?id=${item.id}&filename=${encodeURIComponent(item.name)}&token=${token}`,
+                                { signal: AbortSignal.timeout(3000) }
+                            );
+                            if (!response.ok) continue;
+                            
+                            const status = await response.json();
+                            const serverState = status.state || status.status;
+                            
+                            // If server is resuming and we have a valid file, start upload
+                            if (serverState === 'resuming' || serverState === 'uploading') {
+                                console.log(`[FALLBACK] ${item.id} - Server is ${serverState}, checking if should start`);
+                                
+                                if (item.file && typeof item.file.slice === 'function' && 
+                                    item.state !== 'uploading' && !item.xhr &&
+                                    uploadQueue.active < uploadQueue.maxParallel) {
+                                    console.log(`[FALLBACK] ${item.id} - Starting upload!`);
+                                    item.serverOffset = status.bytesReceived || 0;
+                                    item.offset = status.bytesReceived || 0;
+                                    if (!uploadQueue.queue.find(i => i.id === item.id)) {
+                                        uploadQueue.queue.push(item);
+                                    }
+                                    uploadQueue.process();
+                                }
+                            }
+                            
+                            // Sync pause state
+                            if (serverState === 'paused' || serverState === 'pausing') {
+                                if (item.state !== 'paused') {
+                                    console.log(`[FALLBACK] ${item.id} - Server paused, syncing`);
+                                    item.state = 'paused';
+                                    item.isPaused = true;
+                                    if (item.xhr) item.xhr.abort();
+                                    uploadQueue.updateUI();
+                                }
+                            }
+                        } catch (e) {
+                            // Silent fail on polling error
+                        }
+                    }
+                }
+            }, 2000); // Poll every 2 seconds
+        }
+        
+        function stopFallbackPolling() {
+            if (fallbackPollInterval) {
+                console.log('[FALLBACK] Stopping polling');
+                clearInterval(fallbackPollInterval);
+                fallbackPollInterval = null;
+            }
+        }
+        
         function startServerSse() {
             if (sseConnection) sseConnection.close();
+            stopFallbackPolling(); // Stop fallback when trying SSE
 
             const sseUrl = `${serverUrl}/api/upload/events?token=${token}`;
             sseConnection = new EventSource(sseUrl);
 
-            sseConnection.onopen = () => debugLog('SSE', 'Connected');
+            sseConnection.onopen = () => {
+                debugLog('SSE', 'Connected');
+                stopFallbackPolling(); // SSE working, no need for fallback
+            };
 
             sseConnection.onmessage = (event) => {
                 try {
@@ -757,9 +972,32 @@
                         return;
                     }
 
-                    if (data.type === 'upload' && data.uploadId) {
-                        const item = uploadQueue.items.get(data.uploadId);
-                        if (!item) return;
+                                            if (data.type === 'upload' && data.uploadId) {
+                            let item = uploadQueue.items.get(data.uploadId);
+                            
+                            // On browser refresh, item won't exist - create placeholder from server data
+                            // NOTE: This item cannot actually upload (no File object), just for display
+                            if (!item && data.state && data.state !== 'completed' && data.state !== 'cancelled') {
+                                debugLog('SSE', `${data.uploadId} - Creating placeholder item from server: ${data.state}`);
+                                // Create a fake File-like object for display purposes only
+                                const fakeFile = {
+                                    name: data.fileName || 'Unknown',
+                                    size: data.totalBytes || 0,
+                                    slice: () => { throw new Error('File not available - re-upload required'); }
+                                };
+                                const newItem = new UploadItem(fakeFile);
+                                newItem.id = data.uploadId;
+                                newItem.state = data.state;
+                                newItem.serverOffset = data.bytesReceived || 0;
+                                newItem.offset = data.bytesReceived || 0;
+                                newItem.progress = data.progress || 0;
+                                newItem.isPaused = data.state === 'paused' || data.state === 'pausing' || data.state === 'resuming';
+                                uploadQueue.items.set(data.uploadId, newItem);
+                                item = newItem;
+                                uploadQueue.updateUI();
+                            }
+                            
+                            if (!item) return;
 
                         // Handle server-side state changes
                         if (data.state === 'cancelled') {
@@ -782,14 +1020,41 @@
                             uploadQueue.updateUI();
                         } else if (data.state === 'resuming') {
                             // Server is ready for resume - browser should POST
-                            debugLog('SSE', `${data.uploadId} - Server resuming, triggering resume`);
-                            const resumed = uploadQueue.resume(data.uploadId);
+                            debugLog('SSE', `${data.uploadId} - Server signaled RESUMING`);
+                            debugLog('SSE', `${data.uploadId} - Current item state: ${item?.state}, xhr: ${item?.xhr ? 'exists' : 'null'}`);
+
+                            // Don't try to resume placeholder items (created after browser refresh)
+                            if (item.file && typeof item.file.slice !== 'function') {
+                                debugLog('SSE', `${data.uploadId} - Placeholder item (no File), cannot auto-resume`);
+                                item.state = 'paused';
+                                item.error = 'File selection required after browser refresh';
+                                uploadQueue.updateUI();
+                                return;
+                            }
+
+                            // Only resume if currently paused - resume() requires state === 'paused'
+                            let resumed = false;
+                            if (item.state === 'paused' && !item.xhr) {
+                                resumed = uploadQueue.resume(data.uploadId);
+                                debugLog('SSE', `${data.uploadId} - uploadQueue.resume() returned: ${resumed}`);
+                            } else {
+                                debugLog('SSE', `${data.uploadId} - Skipping resume(state=${item.state}, xhr=${!!item.xhr})`);
+                            }
+
                             if (resumed) {
                                 // start() may have already switched state to 'uploading' synchronously
                                 if (item.state !== 'uploading') {
                                     item.state = 'resuming';
                                 }
                                 uploadQueue.updateUI();
+                            } else if (item.state === 'paused') {
+                                // Item still paused but server is resuming - force start via polling
+                                debugLog('SSE', `${data.uploadId} - Server resuming but item paused, triggering forcePollAndUpload`);
+                                item.state = 'resuming';
+                                uploadQueue.updateUI();
+                                forcePollAndUpload(data.uploadId);
+                            } else {
+                                debugLog('SSE', `${data.uploadId} - resume() returned false, not updating UI`);
                             }
                         } else if (data.state === 'completed') {
                             item.state = 'completed';
@@ -817,8 +1082,10 @@
                 }
             };
 
-            sseConnection.onerror = () => {
-                debugLog('SSE', 'Error, reconnecting in 3s...');
+            sseConnection.onerror = (error) => {
+                errorLog('SSE', 'Connection error', error);
+                console.log('[SSE] Error, will reconnect in 3s and start fallback polling');
+                startFallbackPolling(); // Start aggressive polling when SSE fails
                 setTimeout(startServerSse, 3000);
             };
         }
@@ -920,22 +1187,52 @@
         }
 
         async function resumeUpload(id) {
+            // VISIBLE MARKER - This should ALWAYS appear in console when Resume clicked
+            console.log('');
+            console.log('★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★');
+            console.log('★★★ RESUME BUTTON CLICKED FOR ID:', id, '★★★');
+            console.log('★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★');
+            console.log('');
+            
+            // TEST: Expose to window for manual testing
+            window.TEST_resumeUpload = resumeUpload;
+            
             debugLog('UI', `Resume requested for ${id}`);
+            
+            // Verify functions exist
+            if (!uploadQueue) {
+                console.error('[UI] uploadQueue not found!');
+                return;
+            }
+            if (!uploadQueue.resume) {
+                console.error('[UI] uploadQueue.resume not found!');
+                return;
+            }
+            
             try {
+                console.log(`[UI] Calling fetch for resume...`);
                 const response = await fetch(`${serverUrl}/api/upload/resume?token=${token}&id=${id}`, { method: 'POST' });
+                console.log(`[UI] Resume response status: ${response.status}`);
+                
                 const data = await response.json().catch(() => ({}));
+                console.log(`[UI] Resume response data:`, data);
 
                 if (response.ok && data.success) {
-                    // Optimistically show resuming, scheduler still starts via queue resume.
+                    console.log(`[UI] Resume accepted by server, calling queue resume`);
                     const resumed = uploadQueue.resume(id);
+                    console.log(`[UI] uploadQueue.resume returned: ${resumed}`);
+                    
                     if (resumed) {
                         const item = uploadQueue.items.get(id);
                         if (item) {
-                            // Do not overwrite active upload state if queue started immediately.
                             if (item.state !== 'uploading') {
                                 item.state = 'resuming';
                             }
                             uploadQueue.updateUI();
+                            
+                            // FORCE POLL
+                            console.log(`[UI] Starting forcePollAndUpload`);
+                            forcePollAndUpload(id);
                         }
                     }
                     return;
@@ -943,8 +1240,100 @@
 
                 showToast(data.message || 'Unable to resume from current state', 'error');
             } catch (e) {
+                console.error('[UI] Resume request failed:', e);
                 showToast('Resume request failed', 'error');
             }
+        }
+        
+        // Force poll status and POST - don't wait for SSE
+        async function forcePollAndUpload(id) {
+            console.log(`[UI] >>>>> forcePollAndUpload STARTED for ${id}`);
+            
+            const item = uploadQueue.items.get(id);
+            if (!item) {
+                console.error(`[UI] ${id} - Item not found`);
+                return;
+            }
+            if (!item.file) {
+                console.error(`[UI] ${id} - No file object`);
+                return;
+            }
+            if (typeof item.file.slice !== 'function') {
+                console.error(`[UI] ${id} - file.slice not a function (placeholder file)`);
+                item.state = 'paused';
+                item.error = 'File selection required after browser refresh';
+                uploadQueue.updateUI();
+                return;
+            }
+            
+            console.log(`[UI] ${id} - Starting poll loop`);
+            let attempts = 0;
+            const maxAttempts = 20;
+            
+            while (attempts < maxAttempts) {
+                attempts++;
+                console.log(`[UI] ${id} - Poll attempt ${attempts}/${maxAttempts}`);
+                
+                if (item.state === 'uploading' && item.xhr) {
+                    console.log(`[UI] ${id} - Already uploading, exit`);
+                    return;
+                }
+                
+                if (item.state === 'paused' || item.state === 'cancelled') {
+                    console.log(`[UI] ${id} - Stopped (${item.state}), exit`);
+                    return;
+                }
+                
+                try {
+                    const statusRes = await fetch(
+                        `${serverUrl}/api/upload/status?id=${id}&filename=${encodeURIComponent(item.name)}&token=${token}`,
+                        { signal: AbortSignal.timeout(5000) }
+                    );
+                    
+                    if (!statusRes.ok) {
+                        console.log(`[UI] ${id} - Status fetch failed: ${statusRes.status}`);
+                        continue;
+                    }
+                    
+                    const status = await statusRes.json();
+                    console.log(`[UI] ${id} - Status:`, status);
+                    
+                    const serverState = status.state || status.status;
+                    
+                    if (serverState === 'resuming' || serverState === 'uploading') {
+                        console.log(`[UI] ${id} - Server ready (${serverState})`);
+                        
+                        if (item.state !== 'uploading') {
+                            item.serverOffset = status.bytesReceived || 0;
+                            item.offset = status.bytesReceived || 0;
+                            
+                            if (!item.xhr && uploadQueue.active < uploadQueue.maxParallel) {
+                                console.log(`[UI] ${id} - Starting upload`);
+                                if (!uploadQueue.queue.find(i => i.id === id)) {
+                                    uploadQueue.queue.push(item);
+                                }
+                                uploadQueue.process();
+                            }
+                        }
+                        return;
+                    }
+                    
+                    if (serverState === 'paused') {
+                        console.log(`[UI] ${id} - Server paused`);
+                        item.state = 'paused';
+                        uploadQueue.updateUI();
+                        return;
+                    }
+                    
+                } catch (e) {
+                    console.error(`[UI] ${id} - Poll error:`, e);
+                }
+                
+                await new Promise(r => setTimeout(r, 500));
+            }
+            
+            console.error(`[UI] ${id} - Poll exhausted`);
+            showToast('Resume timeout - please try again', 'error');
         }
 
         async function cancelUpload(id) {
@@ -1016,9 +1405,11 @@
                     break;
                 case 'paused':
                     statusText = 'Paused';
+                    // Escape ID for HTML attribute safety
+                    const safeId = upload.id.replace(/'/g, "\\'");
                     actionButtons = `
-                        <button onclick="resumeUpload('${upload.id}')" class="text-green-500 hover:text-green-600 text-sm mr-2">Resume</button>
-                        <button onclick="cancelUpload('${upload.id}')" class="text-red-500 hover:text-red-600 text-sm">Cancel</button>
+                        <button onclick="resumeUpload('${safeId}')" class="text-green-500 hover:text-green-600 text-sm mr-2">Resume</button>
+                        <button onclick="cancelUpload('${safeId}')" class="text-red-500 hover:text-red-600 text-sm">Cancel</button>
                     `;
                     break;
                 case 'completed':
@@ -1125,6 +1516,17 @@
         window.DEBUG_UPLOAD = false;
         window.uploadQueue = uploadQueue;
         window.debugLog = debugLog;
+        
+        // TEST HELPERS - Run these in console to debug
+        window.testResume = function(id) {
+            console.log('Manual test of resumeUpload with id:', id);
+            resumeUpload(id);
+        };
+        window.testGetItem = function(id) {
+            const item = uploadQueue.items.get(id);
+            console.log('Item:', item);
+            return item;
+        };
     </script>
 </body>
 </html>

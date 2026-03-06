@@ -357,16 +357,27 @@ class FileRepository @Inject constructor(
      * @return Result containing Unit on success
      */
     override suspend fun deleteFile(fileId: String): Result<Unit> = runCatching {
-        val uri = Uri.parse(fileId)
+        // Handle numeric MediaStore IDs (e.g., "1000086333") vs full URIs
+        val isNumericId = fileId.all { it.isDigit() }
         
-        // For MediaStore URIs, use ContentResolver directly
-        if (uri.authority == "media") {
+        if (isNumericId) {
+            // Numeric ID - construct MediaStore URI
+            val uri = Uri.withAppendedPath(MediaStore.Files.getContentUri("external"), fileId)
             val deleted = context.contentResolver.delete(uri, null, null)
-            if (deleted == 0) throw IllegalStateException("MediaStore delete failed: $fileId")
+            if (deleted == 0) throw IllegalStateException("MediaStore delete failed for id: $fileId")
         } else {
-            // For SAF URIs, use DocumentFile
-            val docFile = DocumentFile.fromSingleUri(context, uri)
-            if (docFile == null || !docFile.delete()) throw IllegalStateException("SAF delete failed: $fileId")
+            // Full URI - parse and handle based on authority
+            val uri = Uri.parse(fileId)
+            
+            if (uri.authority == "media") {
+                // MediaStore URI
+                val deleted = context.contentResolver.delete(uri, null, null)
+                if (deleted == 0) throw IllegalStateException("MediaStore delete failed: $fileId")
+            } else {
+                // SAF URI
+                val docFile = DocumentFile.fromSingleUri(context, uri)
+                if (docFile == null || !docFile.delete()) throw IllegalStateException("SAF delete failed: $fileId")
+            }
         }
     }
 

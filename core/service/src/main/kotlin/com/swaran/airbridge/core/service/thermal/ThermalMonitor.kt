@@ -105,12 +105,8 @@ class ThermalMonitor @Inject constructor(
      */
     private fun checkThermalStatus() {
         val status = getThermalStatus()
-        
-        // Only log thermal status when it's elevated (above NONE) or when taking action
-        if (status > PowerManager.THERMAL_STATUS_NONE) {
-            logger.d(TAG, "checkThermalStatus", "Thermal status: $status (thresholds: pause=$PAUSE_THRESHOLD, resume=$RESUME_THRESHOLD)")
-        }
 
+        // Only log when taking action or at SEVERE+ (not for normal operation)
         when {
             status >= PAUSE_THRESHOLD && !wasPausedByThermal -> {
                 // Device is overheating - pause all uploads
