@@ -378,14 +378,14 @@ class UploadScheduler @Inject constructor(
      * Browser should POST within deadline or server reverts to PAUSED.
      * Deadline is cancelled when browser successfully POSTs.
      */
-    fun resume(uploadId: String) {
-        val status = stateManager.getStatus(uploadId)
-        if (status?.state != UploadState.PAUSED) {
-            logger.w(TAG, "resume", "[$uploadId] Cannot resume from state ${status?.state}")
-            return
+    fun resume(uploadId: String): Boolean {
+        // Atomic transition check+set avoids TOCTOU between read and transition
+        val transitioned = stateManager.transition(uploadId, UploadState.RESUMING)
+        if (!transitioned) {
+            logger.w(TAG, "resume", "[$uploadId] Cannot resume from state ${stateManager.getStatus(uploadId)?.state}")
+            return false
         }
 
-        stateManager.transition(uploadId, UploadState.RESUMING)
         logger.d(TAG, "resume", "[$uploadId] Set RESUMING, 30s deadline started")
 
         // Deadline: revert to PAUSED if browser never POSTs
@@ -398,6 +398,7 @@ class UploadScheduler @Inject constructor(
             }
         }
         resumeDeadlines[uploadId] = deadlineJob
+        return true
     }
 
     /**

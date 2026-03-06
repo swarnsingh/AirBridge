@@ -522,7 +522,9 @@
                         // RESUMING from server - we should POST immediately to start uploading
                         if (serverState === 'resuming') {
                             debugLog('UPLOAD', `${item.id} - Server is resuming, proceeding to POST immediately`);
-                            item.state = 'resuming';
+                            if (item.state !== 'uploading') {
+                                item.state = 'resuming';
+                            }
                             item.isPaused = false;
                             // Continue to POST below - don't return
                         }
@@ -657,7 +659,7 @@
                         
                         item.progress = Math.min(cappedProgress, 99.9);
                         const optimisticOffset = Math.min(offset + e.loaded, item.fileSize);
-                        item.offset = Math.max(item.serverOffset, optimisticOffset);  // Never regress behind confirmed bytes
+                        item.offset = Math.max(item.offset, item.serverOffset, optimisticOffset);  // Monotonic local+server progress
                         uploadQueue.updateUI();
                     }
                 };
@@ -783,7 +785,10 @@
                             debugLog('SSE', `${data.uploadId} - Server resuming, triggering resume`);
                             const resumed = uploadQueue.resume(data.uploadId);
                             if (resumed) {
-                                item.state = 'resuming';
+                                // start() may have already switched state to 'uploading' synchronously
+                                if (item.state !== 'uploading') {
+                                    item.state = 'resuming';
+                                }
                                 uploadQueue.updateUI();
                             }
                         } else if (data.state === 'completed') {
@@ -926,7 +931,10 @@
                     if (resumed) {
                         const item = uploadQueue.items.get(id);
                         if (item) {
-                            item.state = 'resuming';
+                            // Do not overwrite active upload state if queue started immediately.
+                            if (item.state !== 'uploading') {
+                                item.state = 'resuming';
+                            }
                             uploadQueue.updateUI();
                         }
                     }

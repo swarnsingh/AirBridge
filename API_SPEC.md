@@ -100,6 +100,7 @@ COMPLETED, CANCELLED, ERROR → empty (terminal)
   "bytesReceived": 65536,
   "serverOffset": 65536,
   "status": "paused",
+  "state": "paused",
   "canResume": true,
   "isBusy": false
 }
@@ -111,13 +112,15 @@ COMPLETED, CANCELLED, ERROR → empty (terminal)
 | `exists` | boolean | File exists on disk |
 | `bytesReceived` | number | Disk size (source of truth) |
 | `serverOffset` | number | Server-authoritative bytes for progress capping |
-| `status` | string | Current state value |
+| `status` | string | Current state value (legacy-compatible key) |
+| `state` | string | Current state value (preferred key for new clients) |
 | `canResume` | boolean | Can resume from current offset |
 | `isBusy` | boolean | File locked by another upload |
 
 **⚠️ CRITICAL:** 
-- Browser checks `status.status` (not `status.state`)
-- Browser uses `serverOffset` to cap progress display (prevents TCP buffer drift)
+- Server returns both `status` and `state` with the same value for compatibility.
+- Browser should read `state` when available, with fallback to `status`.
+- Browser uses server-confirmed bytes (`bytesReceived`/`serverOffset`) to cap progress display (prevents TCP buffer drift).
 
 ---
 
@@ -255,7 +258,19 @@ Content-Length: {chunkSize}
 ```json
 {
   "success": true,
+  "uploadId": "abc123",
+  "state": "resuming",
   "message": "Resume requested - browser will POST from disk offset"
+}
+```
+
+**Response (409 Conflict):**
+```json
+{
+  "success": false,
+  "uploadId": "abc123",
+  "error": "invalid_state",
+  "message": "Upload is not paused; cannot resume"
 }
 ```
 
@@ -411,11 +426,15 @@ async function pauseUpload(id) {
   // SSE will notify browser to abort XHR
 }
 
-// Resume button  
+// Resume button
 async function resumeUpload(id) {
-  await fetch(`/api/upload/resume?token=${token}&id=${id}`, {method: 'POST'});
-  // Server sets RESUMING with 30s deadline
-  // Browser SSE handler will trigger POST automatically
+  const resp = await fetch(`/api/upload/resume?token=${token}&id=${id}`, {method: 'POST'});
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok || !data.success) {
+    showToast(data.message || 'Unable to resume from current state', 'error');
+    return;
+  }
+  // Server accepted resume: state is now RESUMING and browser should POST from server offset
 }
 
 // Cancel button

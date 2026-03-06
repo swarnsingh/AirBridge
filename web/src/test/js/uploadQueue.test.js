@@ -300,3 +300,69 @@ describe('Multi-File Scenarios', () => {
 
 // Export for use in other test files
 module.exports = { MockUploadQueue, MockUploadItem };
+
+
+describe('Progress offset guards', () => {
+  function applyProgressOffset(item, baseOffset, loaded) {
+    const optimisticOffset = Math.min(baseOffset + loaded, item.fileSize);
+    return Math.max(item.offset, item.serverOffset, optimisticOffset);
+  }
+
+  test('offset never regresses when serverOffset jumps forward', () => {
+    const item = { offset: 700, serverOffset: 900, fileSize: 1000 };
+
+    const next = applyProgressOffset(item, 700, 20); // optimistic would be 720
+
+    expect(next).toBe(900); // preserve higher server-confirmed offset
+  });
+
+  test('offset advances monotonically with local progress', () => {
+    const item = { offset: 500, serverOffset: 520, fileSize: 1000 };
+
+    const next = applyProgressOffset(item, 520, 40); // optimistic 560
+
+    expect(next).toBe(560);
+  });
+});
+
+describe('resume button error handling', () => {
+  async function resumeUploadWithDeps(id, deps) {
+    const response = await deps.fetchImpl(`/api/upload/resume?id=${id}`, { method: 'POST' });
+    const data = await response.json().catch(() => ({}));
+
+    if (response.ok && data.success) {
+      const resumed = deps.queue.resume(id);
+      if (resumed) {
+        const item = deps.queue.items.get(id);
+        if (item && item.state !== 'uploading') {
+          item.state = 'resuming';
+        }
+      }
+      return;
+    }
+
+    deps.showToast(data.message || 'Unable to resume from current state', 'error');
+  }
+
+  test('shows toast when resume endpoint rejects request', async () => {
+    const queue = new MockUploadQueue();
+    const item = new MockUploadItem('u-1', 'f.bin');
+    item.state = 'uploading';
+    queue.add(item);
+
+    const toasts = [];
+
+    await resumeUploadWithDeps('u-1', {
+      queue,
+      showToast: (message, type) => toasts.push({ message, type }),
+      fetchImpl: async () => ({
+        ok: false,
+        json: async () => ({ success: false, message: 'Upload is not paused; cannot resume' })
+      })
+    });
+
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0].type).toBe('error');
+    expect(toasts[0].message).toMatch(/cannot resume/i);
+  });
+});
