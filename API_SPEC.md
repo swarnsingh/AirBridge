@@ -307,7 +307,57 @@ Content-Length: {chunkSize}
 
 ---
 
-### 3.6 Server-Sent Events (SSE)
+### 3.6 Pause All Uploads
+
+**Endpoint:** `POST /api/upload/pauseAll`
+
+**Query Parameters:**
+```
+?token={sessionToken}
+```
+
+**Server Behavior:**
+1. Set global queue pause flag
+2. Signal active uploads to pause
+3. New upload POSTs return busy until resumed
+
+**Response (200 OK):**
+```json
+{
+  "success": true,
+  "isPaused": true,
+  "message": "All uploads paused"
+}
+```
+
+---
+
+### 3.7 Resume All Uploads
+
+**Endpoint:** `POST /api/upload/resumeAll`
+
+**Query Parameters:**
+```
+?token={sessionToken}
+```
+
+**Server Behavior:**
+1. Clear global queue pause flag
+2. Transition paused uploads to `RESUMING`
+3. Browser receives SSE and resumes with POST from disk offsets
+
+**Response (200 OK):**
+```json
+{
+  "success": true,
+  "isPaused": false,
+  "message": "All uploads resumed"
+}
+```
+
+---
+
+### 3.8 Server-Sent Events (SSE)
 
 **Endpoint:** `GET /api/upload/events`
 

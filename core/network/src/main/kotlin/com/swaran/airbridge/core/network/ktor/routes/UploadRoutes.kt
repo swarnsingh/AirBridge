@@ -60,6 +60,8 @@ class UploadRoutes @Inject constructor(
             uploadPostRoute()
             uploadPauseRoute()
             uploadResumeRoute()
+            uploadPauseAllRoute()
+            uploadResumeAllRoute()
             uploadCancelRoute()
             uploadMetricsRoute()
         }
@@ -349,6 +351,44 @@ class UploadRoutes @Inject constructor(
                 put(ResponseFields.UPLOAD_ID, uploadId)
                 put("state", "resuming")
                 put("message", "Resume requested - browser will POST from disk offset")
+            })
+        }
+    }
+
+    private fun Route.uploadPauseAllRoute() {
+        post("/api/upload/pauseAll") {
+            val token = call.request.queryParameters[QueryParams.TOKEN]
+                ?: return@post call.respond(HttpStatusCode.Unauthorized, errorJson("Missing token"))
+
+            if (!sessionTokenManager.validateSession(token)) {
+                return@post call.respond(HttpStatusCode.Unauthorized, errorJson("Invalid token"))
+            }
+
+            queueManager.pauseAll()
+
+            call.respondNoCache(HttpStatusCode.OK, buildJsonObject {
+                put(ResponseFields.SUCCESS, true)
+                put(ResponseFields.IS_PAUSED, true)
+                put("message", "All uploads paused")
+            })
+        }
+    }
+
+    private fun Route.uploadResumeAllRoute() {
+        post("/api/upload/resumeAll") {
+            val token = call.request.queryParameters[QueryParams.TOKEN]
+                ?: return@post call.respond(HttpStatusCode.Unauthorized, errorJson("Missing token"))
+
+            if (!sessionTokenManager.validateSession(token)) {
+                return@post call.respond(HttpStatusCode.Unauthorized, errorJson("Invalid token"))
+            }
+
+            queueManager.resumeAll()
+
+            call.respondNoCache(HttpStatusCode.OK, buildJsonObject {
+                put(ResponseFields.SUCCESS, true)
+                put(ResponseFields.IS_PAUSED, false)
+                put("message", "All uploads resumed")
             })
         }
     }
