@@ -200,6 +200,7 @@ class UploadScheduler @Inject constructor(
             if (state == UploadState.COMPLETED ||
                 state == UploadState.CANCELLED ||
                 state == UploadState.ERROR) {
+                resumeDeadlines.remove(uploadId)?.cancel()
                 sessions.remove(uploadId)
             }
         }
@@ -354,6 +355,9 @@ class UploadScheduler @Inject constructor(
      * Clearing job early ensures resume POST doesn't wait behind lock cleanup.
      */
     fun pauseUpload(uploadId: String): Boolean {
+        // Cancel pending resume deadline immediately (if any) to avoid stale timer flips.
+        resumeDeadlines.remove(uploadId)?.cancel()
+
         // Always transition state first - session may not exist if upload hasn't started
         val transitioned = stateManager.transition(uploadId, UploadState.PAUSING)
         if (!transitioned) return false
@@ -378,15 +382,18 @@ class UploadScheduler @Inject constructor(
      * Browser should POST within deadline or server reverts to PAUSED.
      * Deadline is cancelled when browser successfully POSTs.
      */
-    fun resume(uploadId: String) {
-        val status = stateManager.getStatus(uploadId)
-        if (status?.state != UploadState.PAUSED) {
-            logger.w(TAG, "resume", "[$uploadId] Cannot resume from state ${status?.state}")
-            return
+    fun resume(uploadId: String): Boolean {
+        // Atomic transition check+set avoids TOCTOU between read and transition
+        val transitioned = stateManager.transition(uploadId, UploadState.RESUMING)
+        if (!transitioned) {
+            logger.w(TAG, "resume", "[$uploadId] Cannot resume from state ${stateManager.getStatus(uploadId)?.state}")
+            return false
         }
 
-        stateManager.transition(uploadId, UploadState.RESUMING)
         logger.d(TAG, "resume", "[$uploadId] Set RESUMING, 30s deadline started")
+
+        // Replace any previous deadline safely
+        resumeDeadlines.remove(uploadId)?.cancel()
 
         // Deadline: revert to PAUSED if browser never POSTs
         val deadlineJob = applicationScope.launch {
@@ -398,6 +405,7 @@ class UploadScheduler @Inject constructor(
             }
         }
         resumeDeadlines[uploadId] = deadlineJob
+        return true
     }
 
     /**
@@ -411,6 +419,7 @@ class UploadScheduler @Inject constructor(
      * Cancel upload and delete partial file.
      */
     suspend fun cancel(uploadId: String, request: UploadRequest) {
+        resumeDeadlines.remove(uploadId)?.cancel()
         sessions[uploadId]?.let { session ->
             session.cancel()
             withTimeoutOrNull(3000) {

@@ -190,12 +190,13 @@ class UploadQueueManager @Inject constructor(
      *
      * @see UploadScheduler.resume for deadline handling
      */
-    fun resume(uploadId: String) {
-        val status = stateManager.getStatus(uploadId)
-        if (status?.state == UploadState.PAUSED) {
-            logger.d(TAG, "resume", "[$uploadId] Setting RESUMING, awaiting browser POST")
-            scheduler.resume(uploadId)
+    fun resume(uploadId: String): Boolean {
+        logger.d(TAG, "resume", "[$uploadId] Resume requested")
+        val accepted = scheduler.resume(uploadId)
+        if (!accepted) {
+            logger.w(TAG, "resume", "[$uploadId] Ignored resume from state=${stateManager.getStatus(uploadId)?.state}")
         }
+        return accepted
     }
 
     /**

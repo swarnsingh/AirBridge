@@ -47,6 +47,17 @@ class ApiContractTest {
         assertEquals("success", ResponseFields.SUCCESS)
     }
 
+
+    @Test
+    fun `response fields - IS_PAUSED must be isPaused`() {
+        assertEquals("isPaused", ResponseFields.IS_PAUSED)
+    }
+
+    @Test
+    fun `response fields - CHECKSUM must be checksum`() {
+        assertEquals("checksum", ResponseFields.CHECKSUM)
+    }
+
     @Test
     fun `all state values match expected strings`() {
         // Browser checks these exact string values

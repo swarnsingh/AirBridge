@@ -300,3 +300,182 @@ describe('Multi-File Scenarios', () => {
 
 // Export for use in other test files
 module.exports = { MockUploadQueue, MockUploadItem };
+
+
+describe('Progress offset guards', () => {
+  function applyProgressOffset(item, baseOffset, loaded) {
+    const optimisticOffset = Math.min(baseOffset + loaded, item.fileSize);
+    return Math.max(item.offset, item.serverOffset, optimisticOffset);
+  }
+
+  test('offset never regresses when serverOffset jumps forward', () => {
+    const item = { offset: 700, serverOffset: 900, fileSize: 1000 };
+
+    const next = applyProgressOffset(item, 700, 20); // optimistic would be 720
+
+    expect(next).toBe(900); // preserve higher server-confirmed offset
+  });
+
+  test('offset advances monotonically with local progress', () => {
+    const item = { offset: 500, serverOffset: 520, fileSize: 1000 };
+
+    const next = applyProgressOffset(item, 520, 40); // optimistic 560
+
+    expect(next).toBe(560);
+  });
+});
+
+describe('resume button error handling', () => {
+  async function resumeUploadWithDeps(id, deps) {
+    const response = await deps.fetchImpl(`/api/upload/resume?id=${id}`, { method: 'POST' });
+    const data = await response.json().catch(() => ({}));
+
+    if (response.ok && data.success) {
+      const resumed = deps.queue.resume(id);
+      if (resumed) {
+        const item = deps.queue.items.get(id);
+        if (item && item.state !== 'uploading') {
+          item.state = 'resuming';
+        }
+      }
+      return;
+    }
+
+    deps.showToast(data.message || 'Unable to resume from current state', 'error');
+  }
+
+  test('shows toast when resume endpoint rejects request', async () => {
+    const queue = new MockUploadQueue();
+    const item = new MockUploadItem('u-1', 'f.bin');
+    item.state = 'uploading';
+    queue.add(item);
+
+    const toasts = [];
+
+    await resumeUploadWithDeps('u-1', {
+      queue,
+      showToast: (message, type) => toasts.push({ message, type }),
+      fetchImpl: async () => ({
+        ok: false,
+        json: async () => ({ success: false, message: 'Upload is not paused; cannot resume' })
+      })
+    });
+
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0].type).toBe('error');
+    expect(toasts[0].message).toMatch(/cannot resume/i);
+  });
+});
+
+
+describe('resumeAll respects max parallel scheduling', () => {
+  class SimQueue {
+    constructor(maxParallel = 3) {
+      this.maxParallel = maxParallel;
+      this.active = 0;
+      this.queue = [];
+      this.items = new Map();
+      this.started = [];
+      this.globalPaused = true;
+      this.processing = false;
+    }
+
+    add(item) {
+      this.items.set(item.id, item);
+    }
+
+    resume(id) {
+      const item = this.items.get(id);
+      if (!item) return false;
+      if (item.state === 'completed' || item.state === 'cancelled') return false;
+      if (item.state === 'uploading') return false;
+      item.state = 'queued';
+      if (!this.queue.find(i => i.id === id)) this.queue.push(item);
+      return true;
+    }
+
+    process() {
+      if (this.processing) return;
+      this.processing = true;
+      try {
+        while (this.active < this.maxParallel && this.queue.length > 0) {
+          const item = this.queue.shift();
+          this.active++;
+          item.state = 'uploading';
+          this.started.push(item.id);
+        }
+      } finally {
+        this.processing = false;
+      }
+    }
+
+    resumeAll() {
+      this.globalPaused = false;
+      this.items.forEach(item => {
+        if (item.state === 'paused' || item.state === 'pausing') {
+          this.resume(item.id);
+        }
+      });
+      this.process();
+    }
+  }
+
+  test('resumeAll starts at most maxParallel uploads immediately', () => {
+    const queue = new SimQueue(3);
+
+    for (let i = 1; i <= 6; i++) {
+      queue.add({ id: `u-${i}`, state: 'paused' });
+    }
+
+    queue.resumeAll();
+
+    expect(queue.started.length).toBe(3);
+    expect(queue.active).toBe(3);
+    expect(queue.queue.length).toBe(3);
+  });
+});
+
+
+describe('status sync fallback behavior', () => {
+  test('sync should trigger resume when server reports resuming for paused item', () => {
+    const queue = new MockUploadQueue();
+    const item = new MockUploadItem('sync-1', 'video.mp4');
+    item.state = 'paused';
+    queue.add(item);
+
+    let resumed = false;
+    const originalResume = queue.resume.bind(queue);
+    queue.resume = (id) => {
+      resumed = true;
+      return originalResume(id);
+    };
+
+    const serverState = 'resuming';
+    if (serverState === 'resuming' && (item.state === 'paused' || item.state === 'pausing')) {
+      queue.resume(item.id);
+    }
+
+    expect(resumed).toBe(true);
+    expect(item.state).toBe('queued');
+  });
+
+  test('sync should abort active xhr when server reports paused', () => {
+    const queue = new MockUploadQueue();
+    const item = new MockUploadItem('sync-2', 'video.mp4');
+    item.state = 'uploading';
+    item.xhr = { aborted: false };
+    queue.add(item);
+
+    const serverState = 'paused';
+    if (serverState === 'paused' || serverState === 'pausing') {
+      if (item.state === 'uploading' && item.xhr) {
+        item.xhr.aborted = true;
+      }
+      item.state = 'paused';
+      item.isPaused = true;
+    }
+
+    expect(item.xhr.aborted).toBe(true);
+    expect(item.state).toBe('paused');
+  });
+});

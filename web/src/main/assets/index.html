@@ -280,6 +280,7 @@
                 const item = new UploadItem(file, priority);
                 this.items.set(item.id, item);
                 this.queue.push(item);
+                startUploadStatusSync(item.id); // Fallback when SSE misses state updates
                 debugLog('QUEUE', `Added ${item.id} (${file.name}), queue length: ${this.queue.length}`);
                 this.process();
                 return item;
@@ -353,17 +354,22 @@
 
             resume(id) {
                 const item = this.items.get(id);
-                if (!item) return;
+                if (!item) return false;
+
+                // Guard against stale or duplicate resume attempts
+                if (item.state === 'completed' || item.state === 'cancelled') return false;
+                if (item.state === 'uploading' && item.xhr) return false;
 
                 debugLog('QUEUE', `Resuming ${id} from state: ${item.state}`);
                 item.state = 'queued';
                 item.isPaused = false;
 
-                // Don't add to queue if already there
+                // Don't add to queue if already queued
                 if (!this.queue.find(i => i.id === id)) {
                     this.queue.push(item);
                 }
                 this.process();
+                return true;
             }
 
             pauseAll() {
@@ -413,6 +419,7 @@
                 }
                 
                 this.items.delete(id);
+                stopUploadStatusSync(id);
                 this.updateUI();
             }
 
@@ -476,6 +483,77 @@
         const uploadQueue = new UploadQueueManager(3);
 
         // ==========================================
+        // Upload status sync fallback (for missed SSE / background tab delays)
+        // ==========================================
+        const uploadStatusSyncTimers = new Map();
+
+        function startUploadStatusSync(uploadId) {
+            if (uploadStatusSyncTimers.has(uploadId)) return;
+
+            debugLog('SYNC', `Starting status sync for ${uploadId}`);
+            const timer = setInterval(async () => {
+                const item = uploadQueue.items.get(uploadId);
+                if (!item) {
+                    stopUploadStatusSync(uploadId);
+                    return;
+                }
+
+                if (item.state === 'completed' || item.state === 'cancelled' || item.state === 'error') {
+                    stopUploadStatusSync(uploadId);
+                    return;
+                }
+
+                try {
+                    const statusRes = await fetch(
+                        `${serverUrl}/api/upload/status?id=${uploadId}&filename=${encodeURIComponent(item.name)}&token=${token}`,
+                        { signal: AbortSignal.timeout(5000) }
+                    );
+                    if (!statusRes.ok) return;
+
+                    const status = await statusRes.json();
+                    const serverState = status.state || status.status;
+
+                    if (serverState === 'paused' || serverState === 'pausing') {
+                        if (item.state === 'uploading' && item.xhr) {
+                            debugLog('SYNC', `${uploadId} - Server paused, aborting`);
+                            item.xhr.abort();
+                        }
+                        item.isPaused = true;
+                        item.state = 'paused';
+                        if (status.bytesReceived !== undefined) {
+                            item.updateProgress(status.bytesReceived);
+                        }
+                        uploadQueue.updateUI();
+                        return;
+                    }
+
+                    if (serverState === 'resuming') {
+                        if (item.state === 'paused' || item.state === 'pausing') {
+                            debugLog('SYNC', `${uploadId} - Server resuming, triggering local resume`);
+                            const resumed = uploadQueue.resume(uploadId);
+                            if (resumed && item.state !== 'uploading') {
+                                item.state = 'resuming';
+                            }
+                            uploadQueue.updateUI();
+                        }
+                    }
+                } catch (_) {
+                    // Ignore sync errors; SSE or next tick will recover
+                }
+            }, 1500);
+
+            uploadStatusSyncTimers.set(uploadId, timer);
+        }
+
+        function stopUploadStatusSync(uploadId) {
+            const timer = uploadStatusSyncTimers.get(uploadId);
+            if (!timer) return;
+            clearInterval(timer);
+            uploadStatusSyncTimers.delete(uploadId);
+            debugLog('SYNC', `Stopped status sync for ${uploadId}`);
+        }
+
+        // ==========================================
         // DETERMINISTIC performUpload()
         // Never waits for server. POSTs immediately. Retries on busy.
         // ==========================================
@@ -508,19 +586,23 @@
                     const status = await statusRes.json();
                     debugLog('UPLOAD', `${item.id} - Server status:`, status);
 
+                    const serverState = status.state || status.status;
+
                     // Sync local state with server - pause from phone handling
-                    if (status.state && status.state !== item.state) {
-                        debugLog('UPLOAD', `${item.id} - Syncing state from server: ${status.state}`);
+                    if (serverState && serverState !== item.state) {
+                        debugLog('UPLOAD', `${item.id} - Syncing state from server: ${serverState}`);
                         
                         // RESUMING from server - we should POST immediately to start uploading
-                        if (status.state === 'resuming') {
+                        if (serverState === 'resuming') {
                             debugLog('UPLOAD', `${item.id} - Server is resuming, proceeding to POST immediately`);
-                            item.state = 'resuming';
+                            if (item.state !== 'uploading') {
+                                item.state = 'resuming';
+                            }
                             item.isPaused = false;
                             // Continue to POST below - don't return
                         }
                         // PAUSED or INTERRUPTED from phone - abort XHR immediately, freeze progress
-                        else if (status.state === 'paused' || status.state === 'pausing' || status.state === 'interrupted') {
+                        else if (serverState === 'paused' || serverState === 'pausing' || serverState === 'interrupted') {
                         // CRITICAL: Abort XHR immediately to stop progress
                         if (item.xhr) {
                             item.xhr.abort();
@@ -539,7 +621,7 @@
                         return; // Stop upload loop
                     }
                         
-                        if (status.state === 'completed') {
+                        if (serverState === 'completed') {
                             item.state = 'completed';
                             item.updateProgress(item.fileSize);
                             uploadQueue.updateUI();
@@ -572,6 +654,7 @@
                         item.updateProgress(item.fileSize);
                         uploadQueue.updateUI();
                         showToast(`${item.name} uploaded successfully`, 'success');
+                        stopUploadStatusSync(item.id);
                         loadFiles();
                         return;
                     }
@@ -617,6 +700,7 @@
             // Max attempts reached
             debugLog('UPLOAD', `${item.id} - Max attempts reached, failing`);
             item.state = 'error';
+            stopUploadStatusSync(item.id);
             uploadQueue.updateUI();
         }
 
@@ -649,7 +733,8 @@
                         const cappedProgress = Math.min(totalProgress, serverPercent + 2);
                         
                         item.progress = Math.min(cappedProgress, 99.9);
-                        item.offset = offset + e.loaded;  // Optimistic client offset
+                        const optimisticOffset = Math.min(offset + e.loaded, item.fileSize);
+                        item.offset = Math.max(item.offset, item.serverOffset, optimisticOffset);  // Monotonic local+server progress
                         uploadQueue.updateUI();
                     }
                 };
@@ -757,6 +842,7 @@
                             item.isPaused = true;
                             if (item.xhr) item.xhr.abort();
                             uploadQueue.items.delete(data.uploadId);
+                            stopUploadStatusSync(data.uploadId);
                             uploadQueue.updateUI();
                         } else if (data.state === 'pausing' || data.state === 'paused') {
                             // Server is pausing/paused - snap UI and abort
@@ -773,9 +859,14 @@
                         } else if (data.state === 'resuming') {
                             // Server is ready for resume - browser should POST
                             debugLog('SSE', `${data.uploadId} - Server resuming, triggering resume`);
-                            uploadQueue.resume(data.uploadId);
-                            item.state = 'resuming';
-                            uploadQueue.updateUI();
+                            const resumed = uploadQueue.resume(data.uploadId);
+                            if (resumed) {
+                                // start() may have already switched state to 'uploading' synchronously
+                                if (item.state !== 'uploading') {
+                                    item.state = 'resuming';
+                                }
+                                uploadQueue.updateUI();
+                            }
                         } else if (data.state === 'completed') {
                             item.state = 'completed';
                             item.serverOffset = item.fileSize;
@@ -783,6 +874,7 @@
                             item.progress = 100;
                             if (item.xhr) item.xhr.abort();
                             uploadQueue.updateUI();
+                            stopUploadStatusSync(data.uploadId);
                             showToast(`${item.name} uploaded successfully`, 'success');
                             loadFiles();
                         } else if (data.state === 'uploading') {
@@ -906,8 +998,30 @@
 
         async function resumeUpload(id) {
             debugLog('UI', `Resume requested for ${id}`);
-            await fetch(`${serverUrl}/api/upload/resume?token=${token}&id=${id}`, { method: 'POST' });
-            uploadQueue.resume(id);
+            try {
+                const response = await fetch(`${serverUrl}/api/upload/resume?token=${token}&id=${id}`, { method: 'POST' });
+                const data = await response.json().catch(() => ({}));
+
+                if (response.ok && data.success) {
+                    // Optimistically show resuming, scheduler still starts via queue resume.
+                    const resumed = uploadQueue.resume(id);
+                    if (resumed) {
+                        const item = uploadQueue.items.get(id);
+                        if (item) {
+                            // Do not overwrite active upload state if queue started immediately.
+                            if (item.state !== 'uploading') {
+                                item.state = 'resuming';
+                            }
+                            uploadQueue.updateUI();
+                        }
+                    }
+                    return;
+                }
+
+                showToast(data.message || 'Unable to resume from current state', 'error');
+            } catch (e) {
+                showToast('Resume request failed', 'error');
+            }
         }
 
         async function cancelUpload(id) {
@@ -1021,7 +1135,7 @@
                     </div>
                     <div class="flex justify-between mt-1 text-xs text-gray-500 dark:text-gray-400">
                         <span>${statusText}</span>
-                        <span>${formatBytes(upload.offset)} / ${formatBytes(upload.fileSize)}</span>
+                        <span>${formatBytes(Math.max(upload.serverOffset || 0, upload.state === 'completed' ? upload.fileSize : 0))} / ${formatBytes(upload.fileSize)}</span>
                     </div>
                 </div>
             `;
