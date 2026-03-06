@@ -109,12 +109,12 @@ T3      PAUSING → PAUSED       UPLOADING              User clicks pause on Fil
 T4      PAUSED                 UPLOADING              SSE: File 1 state=paused
 T5      PAUSED                 UPLOADING              User clicks resume on File 1
 T6      RESUMING               UPLOADING              Server sets RESUMING + deadline
-T7      UPLOADING              UPLOADING              Browser POSTs (within 5s)
+T7      UPLOADING              UPLOADING              Browser POSTs (within 30s)
 ```
 
 **Key Transitions:**
 - `PAUSED → RESUMING`: Server accepts, starts deadline watcher
-- `RESUMING → UPLOADING`: Only if browser POSTs within 5s
+- `RESUMING → UPLOADING`: Only if browser POSTs within 30s
 - `RESUMING → PAUSED`: If deadline expires (browser didn't POST)
 
 ---

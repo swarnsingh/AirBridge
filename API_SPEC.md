@@ -1,8 +1,8 @@
-# AirBridge API Specification v2.1
+# AirBridge API Specification v2.2
 
 > **Contract between Browser (index.html) and Server (Ktor)**  
-> Last updated: 2026-03-02  
-> Protocol: Deterministic Fail-Fast with POST-driven resume
+> Last updated: 2026-03-07  
+> Protocol: Deterministic Fail-Fast with POST-driven resume, State Persistence, and Progress Capping
 
 ---
 
@@ -60,7 +60,7 @@ NONE ──┬──► QUEUED ──┬──► UPLOADING ──┬──► C
 | `UPLOADING` | `"uploading"` | Actively receiving bytes | No |
 | `PAUSING` | `"pausing"` | Pause requested, finishing chunk | No |
 | `PAUSED` | `"paused"` | Suspended, can resume | No |
-| `RESUMING` | `"resuming"` | Resume handshake (5s deadline) | No |
+| `RESUMING` | `"resuming"` | Resume handshake (30s deadline) | No |
 | `COMPLETED` | `"completed"` | All bytes received | ✅ Yes |
 | `CANCELLED` | `"cancelled"` | User cancelled, file deleted | ✅ Yes |
 | `ERROR` | `"error"` | Permanent error | ✅ Yes |
@@ -98,6 +98,7 @@ COMPLETED, CANCELLED, ERROR → empty (terminal)
 {
   "exists": true,
   "bytesReceived": 65536,
+  "serverOffset": 65536,
   "status": "paused",
   "canResume": true,
   "isBusy": false
@@ -109,11 +110,14 @@ COMPLETED, CANCELLED, ERROR → empty (terminal)
 |-------|------|-------------|
 | `exists` | boolean | File exists on disk |
 | `bytesReceived` | number | Disk size (source of truth) |
+| `serverOffset` | number | Server-authoritative bytes for progress capping |
 | `status` | string | Current state value |
 | `canResume` | boolean | Can resume from current offset |
 | `isBusy` | boolean | File locked by another upload |
 
-**⚠️ CRITICAL:** Browser checks `status.status` (not `status.state`).
+**⚠️ CRITICAL:** 
+- Browser checks `status.status` (not `status.state`)
+- Browser uses `serverOffset` to cap progress display (prevents TCP buffer drift)
 
 ---
 
@@ -242,8 +246,10 @@ Content-Length: {chunkSize}
 **Server Behavior:**
 1. Validate current state is `PAUSED`
 2. Transition: `PAUSED → RESUMING`
-3. Start 5-second deadline watcher
+3. Start 30-second deadline watcher (stored as cancellable Job)
 4. SSE broadcasts `RESUMING` state to browser
+5. **When browser POSTs: deadline job is cancelled immediately**
+6. If no POST within 30s: revert to `PAUSED`
 
 **Response (200 OK):**
 ```json
@@ -253,7 +259,10 @@ Content-Length: {chunkSize}
 }
 ```
 
-**⚠️ CRITICAL:** Server does NOT auto-resume. Browser MUST POST within 5s or server reverts to `PAUSED`.
+**⚠️ CRITICAL:** 
+- Server does NOT auto-resume. Browser MUST POST within 30s
+- Deadline automatically cancels when browser POSTs (no race condition)
+- If deadline expires, server reverts to `PAUSED`
 
 ---
 
@@ -373,12 +382,24 @@ if (data.state === 'resuming') {
   }
 }
 
+if (data.state === 'uploading') {
+  // Update serverOffset for progress capping
+  item.serverOffset = data.bytesReceived;
+  if (data.bytesReceived > item.offset) {
+    item.updateProgress(data.bytesReceived);
+    updateUI();
+  }
+}
+
 if (data.state === 'completed') {
+  item.serverOffset = item.fileSize;
   item.xhr.abort();
   loadFiles(); // Refresh file list
   showToast('Upload complete');
 }
 ```
+
+**⚠️ CRITICAL:** Browser tracks `serverOffset` (authoritative) separately from local progress. Display progress as `min(localProgress, serverOffset + 2% margin)` to prevent TCP buffer drift.
 
 ### 4.3 Pause/Resume Button Handlers
 
@@ -393,7 +414,7 @@ async function pauseUpload(id) {
 // Resume button  
 async function resumeUpload(id) {
   await fetch(`/api/upload/resume?token=${token}&id=${id}`, {method: 'POST'});
-  // Server sets RESUMING with 5s deadline
+  // Server sets RESUMING with 30s deadline
   // Browser SSE handler will trigger POST automatically
 }
 
@@ -403,6 +424,41 @@ async function cancelUpload(id) {
   uploadQueue.cancel(id); // Abort XHR locally
 }
 ```
+
+### 4.4 Upload Queue Management (REQUIRED)
+
+Browser queue MUST implement reentrancy guard:
+
+```javascript
+class UploadQueueManager {
+  constructor(maxParallel = 3) {
+    this.maxParallel = maxParallel;
+    this.active = 0;
+    this.queue = [];
+    this.processing = false;  // Reentrancy guard
+  }
+
+  process() {
+    if (this.processing) return;  // Atomic - only one scheduler runs
+    this.processing = true;
+    
+    try {
+      while (this.active < this.maxParallel && this.queue.length > 0) {
+        const item = this.queue.shift();
+        this.active++;  // Increment BEFORE starting
+        this.startUpload(item);
+      }
+    } finally {
+      this.processing = false;
+    }
+  }
+}
+```
+
+**⚠️ CRITICAL:** 
+- `processing` guard prevents duplicate queue processing from concurrent events
+- `active++` must happen BEFORE async upload starts
+- This ensures strict MAX_PARALLEL enforcement
 
 ---
 
@@ -415,11 +471,12 @@ async function cancelUpload(id) {
 | **First POST** | `NONE → UPLOADING` | Start from offset 0 |
 | **Resume POST** | `RESUMING → UPLOADING` | Start from `bytesReceived` |
 | **Pause Request** | `UPLOADING → PAUSING → PAUSED` | Abort XHR on SSE |
-| **Resume Request** | `PAUSED → RESUMING` (5s deadline) | POST before deadline |
+| **Resume Request** | `PAUSED → RESUMING` (30s deadline) | POST before deadline |
 | **Deadline Expired** | `RESUMING → PAUSED` | Show paused UI |
 | **Cancel Request** | Cancel job + delete file + `CANCELLED` | Remove from UI |
 | **Server Busy** | Return 409 + `retryAfterMs` | Backoff and retry |
 | **Offset Mismatch** | Return 409 + `expectedOffset` | Use server's offset |
+| **Network Disconnect** | Coroutine dies → auto-pause to `PAUSED` | Resume on reconnect |
 
 ### 5.2 Disk as Source of Truth
 
@@ -501,6 +558,7 @@ rg 'put\("status"' core/network/src/main/kotlin/com/swaran/airbridge/core/networ
 
 | Version | Date | Changes |
 |---------|------|---------|
+| v2.2 | 2026-03-07 | State persistence, resume deadline cancellation, browser progress capping (serverOffset), queue reentrancy guard, network disconnect cleanup, UC-05 race guard |
 | v2.1 | 2026-03-02 | Fixed `status` field name in status endpoint, added cancel file deletion, deterministic resume deadline |
 | v2.0 | 2026-02-28 | Initial fail-fast protocol with POST-driven resume |
 

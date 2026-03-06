@@ -20,6 +20,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicReference
 import javax.inject.Inject
@@ -135,10 +136,12 @@ class UploadScheduler @Inject constructor(
     companion object {
         private const val TAG = "UploadScheduler"
         private const val MAX_CONCURRENT_UPLOADS = 3
+        private const val RESUME_DEADLINE_MS = 30000L  // 30s window for browser POST (was 5s)
     }
 
     private val sessions = ConcurrentHashMap<String, UploadSession>()
     private val uploadSemaphore = Semaphore(MAX_CONCURRENT_UPLOADS)
+    private val resumeDeadlines = ConcurrentHashMap<String, Job>()
 
     val activeUploads: StateFlow<Map<String, UploadStatus>> = stateManager.activeUploads
 
@@ -165,30 +168,38 @@ class UploadScheduler @Inject constructor(
         receiveStream: suspend () -> java.io.InputStream
     ): UploadResult {
         val uploadId = request.uploadId
-        val session = getSession(uploadId)
 
-        // IMPORTANT: Always acquire semaphore before file mutex.
-        // Never reverse ordering to avoid deadlock.
-        uploadSemaphore.acquire()
+        // Cancel any pending resume deadline - browser has POSTed
+        resumeDeadlines.remove(uploadId)?.cancel()
+
+        // Atomic session creation
+        val session = sessions.computeIfAbsent(uploadId) { UploadSession(it) }
+
+        // Fail-fast semaphore — never suspend the caller
+        if (!uploadSemaphore.tryAcquire()) {
+            return UploadResult.Busy(uploadId, retryAfterMs = 300)
+        }
 
         try {
-            session.lock.withLock {
+            // Fail-fast file lock — never suspend the caller
+            if (!session.lock.tryLock()) {
+                return UploadResult.Busy(uploadId, retryAfterMs = 100)
+            }
+            try {
                 val currentJob = currentCoroutineContext()[Job]
                 currentJob?.let { session.setJob(it) }
-
-                try {
-                    return performUpload(request, receiveStream)
-                } finally {
-                    session.clearJob()
-                }
+                return performUpload(request, receiveStream)
+            } finally {
+                session.lock.unlock()
+                session.clearJob()
             }
         } finally {
             uploadSemaphore.release()
             // Clean up session if upload is terminal
-            val status = stateManager.getStatus(uploadId)
-            if (status?.state == UploadState.COMPLETED || 
-                status?.state == UploadState.CANCELLED ||
-                status?.state == UploadState.ERROR) {
+            val state = stateManager.getStatus(uploadId)?.state
+            if (state == UploadState.COMPLETED ||
+                state == UploadState.CANCELLED ||
+                state == UploadState.ERROR) {
                 sessions.remove(uploadId)
             }
         }
@@ -237,8 +248,31 @@ class UploadScheduler @Inject constructor(
 
         logger.d(TAG, "performUpload", "[$uploadId] Starting upload from diskSize=$diskSize")
 
+        // Set up completion handler to catch unexpected coroutine death (network disconnect)
+        val currentJob = currentCoroutineContext()[Job]
+        currentJob?.invokeOnCompletion { cause ->
+            if (cause != null) {
+                val currentState = stateManager.getStatus(uploadId)?.state
+                logger.w(TAG, "performUpload", "[$uploadId] Coroutine died unexpectedly: ${cause.javaClass.simpleName}, state=$currentState")
+                if (currentState == UploadState.UPLOADING || currentState == UploadState.RESUMING) {
+                    stateManager.transition(uploadId, UploadState.PAUSED, "Connection lost")
+                }
+            }
+        }
+
         return try {
             val stream = receiveStream()
+            
+            // UC-05: Validate state still UPLOADING before streaming (catches pause-immediately-after-resume race)
+            val preStreamState = stateManager.getStatus(uploadId)?.state
+            if (preStreamState != UploadState.UPLOADING) {
+                logger.w(TAG, "performUpload", "[$uploadId] State changed to $preStreamState before streaming, aborting")
+                stream.close()
+                return UploadResult.Busy(uploadId, retryAfterMs = 100)
+            }
+            
+            // Track accumulated bytes starting from disk size
+            var totalBytesReceived = diskSize
 
             val result = storageRepository.uploadFile(
                 path = request.path,
@@ -247,9 +281,11 @@ class UploadScheduler @Inject constructor(
                 inputStream = stream,
                 totalBytes = request.totalBytes,
                 append = diskSize > 0,
-                onProgress = { newBytes ->
-                    bytesReceived = diskSize + newBytes
-                    stateManager.updateProgress(uploadId, bytesReceived)
+                onProgress = { incrementalBytes ->
+                    // ACCUMULATE bytes properly - incrementalBytes is just this chunk
+                    totalBytesReceived += incrementalBytes
+                    bytesReceived = totalBytesReceived
+                    stateManager.updateProgress(uploadId, totalBytesReceived)
 
                     // Explicit pause/cancel detection (non-suspend, checks state only)
                     val state = stateManager.getStatus(uploadId)?.state
@@ -292,7 +328,11 @@ class UploadScheduler @Inject constructor(
             // Job was cancelled - check current state to determine if pause or cancel
             val status = stateManager.getStatus(uploadId)
             logger.d(TAG, "performUpload", "[$uploadId] Coroutine cancelled, state: ${status?.state}")
-            if (status?.state == UploadState.PAUSED || status?.state == UploadState.PAUSING) {
+            if (status?.state == UploadState.PAUSING) {
+                // Transition to PAUSED properly
+                stateManager.transition(uploadId, UploadState.PAUSED)
+                UploadResult.Paused(uploadId, bytesReceived)
+            } else if (status?.state == UploadState.PAUSED) {
                 UploadResult.Paused(uploadId, bytesReceived)
             } else {
                 stateManager.transition(uploadId, UploadState.CANCELLED)
@@ -334,23 +374,30 @@ class UploadScheduler @Inject constructor(
     }
 
     /**
-     * Resume upload. Sets state to RESUMING.
-     * Browser POST will transition to UPLOADING when received.
-     * No deadline - POST is the authority.
+     * Resume upload. Sets state to RESUMING with 30s deadline.
+     * Browser should POST within deadline or server reverts to PAUSED.
+     * Deadline is cancelled when browser successfully POSTs.
      */
     fun resume(uploadId: String) {
         val status = stateManager.getStatus(uploadId)
-        logger.d(TAG, "resume", "[$uploadId] Current state: ${status?.state}")
-
         if (status?.state != UploadState.PAUSED) {
             logger.w(TAG, "resume", "[$uploadId] Cannot resume from state ${status?.state}")
             return
         }
 
-        // Set RESUMING state - browser POST will drive transition to UPLOADING
         stateManager.transition(uploadId, UploadState.RESUMING)
+        logger.d(TAG, "resume", "[$uploadId] Set RESUMING, 30s deadline started")
 
-        logger.d(TAG, "resume", "[$uploadId] Set RESUMING, awaiting browser POST")
+        // Deadline: revert to PAUSED if browser never POSTs
+        val deadlineJob = applicationScope.launch {
+            delay(RESUME_DEADLINE_MS)
+            resumeDeadlines.remove(uploadId)
+            if (stateManager.getStatus(uploadId)?.state == UploadState.RESUMING) {
+                logger.w(TAG, "resume", "[$uploadId] Browser missed 30s window, reverting to PAUSED")
+                stateManager.transition(uploadId, UploadState.PAUSED)
+            }
+        }
+        resumeDeadlines[uploadId] = deadlineJob
     }
 
     /**
@@ -364,24 +411,14 @@ class UploadScheduler @Inject constructor(
      * Cancel upload and delete partial file.
      */
     suspend fun cancel(uploadId: String, request: UploadRequest) {
-        logger.d(TAG, "cancel", "[$uploadId] Requested")
-        
-        // 1. Cancel via session (signals upload to stop)
-        val session = sessions[uploadId]
-        if (session != null) {
-            logger.d(TAG, "cancel", "[$uploadId] Cancelling via session")
+        sessions[uploadId]?.let { session ->
             session.cancel()
-            // Wait for the job to complete cancellation
-            session.jobRef.get()?.join()
+            withTimeoutOrNull(3000) {
+                session.jobRef.get()?.join()
+            } ?: logger.w(TAG, "cancel", "[$uploadId] Job didn't finish in 3s, forcing cleanup")
         }
-        
-        // 2. Clean up partial file
         cleanupPartial(request)
-        
-        // 3. Mark as cancelled in state
         stateManager.transition(uploadId, UploadState.CANCELLED)
-        
-        // 4. Remove session
         sessions.remove(uploadId)
     }
 

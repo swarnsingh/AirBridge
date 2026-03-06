@@ -1,7 +1,6 @@
 package com.swaran.airbridge.core.network.upload
 
 import com.swaran.airbridge.core.common.logging.AirLogger
-import com.swaran.airbridge.domain.model.UploadMetadata
 import com.swaran.airbridge.domain.model.UploadRequest
 import com.swaran.airbridge.domain.model.UploadResult
 import com.swaran.airbridge.domain.model.UploadState
@@ -10,6 +9,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -91,9 +91,6 @@ class UploadQueueManager @Inject constructor(
     private val _queueState = MutableStateFlow(QueueState())
     val queueState: StateFlow<QueueState> = _queueState.asStateFlow()
 
-    /** Coroutine scope for upload execution */
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-
     /**
      * Enqueue and execute an upload request.
      *
@@ -106,11 +103,10 @@ class UploadQueueManager @Inject constructor(
      *
      * ## Protocol Flow
      *
-     * 1. Initialize upload metadata in state manager
-     * 2. Check global pause state
-     * 3. Delegate to [UploadScheduler.handleUpload] for file locking
-     * 4. Stream data via [receiveStream]
-     * 5. Return result based on final state
+     * 1. Check global pause state
+     * 2. Delegate to [UploadScheduler.handleUpload] for file locking
+     * 3. Stream data via [receiveStream]
+     * 4. Return result based on final state
      *
      * @param request Upload metadata (id, filename, offset, etc.)
      * @param receiveStream Suspended lambda providing the HTTP input stream
@@ -121,16 +117,6 @@ class UploadQueueManager @Inject constructor(
         receiveStream: suspend () -> java.io.InputStream
     ): UploadResult {
         logger.d(TAG, "enqueue", "[${request.uploadId}] Enqueuing ${request.fileName} (offset=${request.offset})")
-
-        // Initialize state if new upload
-        val metadata = UploadMetadata(
-            uploadId = request.uploadId,
-            fileUri = request.fileUri,
-            displayName = request.fileName,
-            path = request.path,
-            totalBytes = request.totalBytes
-        )
-        stateManager.initialize(metadata)
 
         // Check global pause - return busy if paused
         if (isGlobalPaused.get()) {
@@ -160,49 +146,16 @@ class UploadQueueManager @Inject constructor(
         receiveStream: suspend () -> java.io.InputStream
     ): UploadResult {
         val uploadId = request.uploadId
+        // Track the calling coroutine's job, not a wrapper
+        coroutineContext[Job]?.let { activeJobs[uploadId] = it }
+        updateQueueState()
 
-        // Register job for tracking
-        val job = scope.launch {
+        return try {
             scheduler.handleUpload(request, receiveStream)
+        } finally {
+            activeJobs.remove(uploadId)
+            updateQueueState()
         }
-        activeJobs[uploadId] = job
-
-        updateQueueState()
-
-        // Wait for completion and map result
-        val result = try {
-            job.join()
-
-            // Map final state to result type
-            scheduler.activeUploads.value[uploadId]?.let { status ->
-                when (status.state) {
-                    UploadState.COMPLETED -> UploadResult.Success(
-                        uploadId = uploadId,
-                        bytesReceived = status.bytesReceived,
-                        fileId = ""
-                    )
-                    UploadState.PAUSED -> UploadResult.Paused(uploadId, status.bytesReceived)
-                    UploadState.CANCELLED -> UploadResult.Cancelled(uploadId)
-                    else -> UploadResult.Failure.UnknownError(
-                        uploadId = uploadId,
-                        bytesReceived = status.bytesReceived,
-                        cause = Exception("Final state: ${status.state}")
-                    )
-                }
-            } ?: UploadResult.Failure.UnknownError(
-                uploadId = uploadId,
-                bytesReceived = 0,
-                cause = Exception("No final status")
-            )
-        } catch (e: Exception) {
-            UploadResult.Failure.UnknownError(uploadId, 0, e)
-        }
-
-        // Cleanup
-        activeJobs.remove(uploadId)
-        updateQueueState()
-
-        return result
     }
 
     /**
@@ -266,12 +219,20 @@ class UploadQueueManager @Inject constructor(
     /**
      * Resume all uploads.
      *
-     * Clears global pause flag. Individual uploads remain PAUSED until browser
-     * POSTs to resume them (deterministic POST-driven protocol).
+     * Clears global pause flag and signals all PAUSED uploads to resume.
      */
     fun resumeAll() {
-        logger.i(TAG, "resumeAll", "Clearing global pause")
+        logger.i(TAG, "resumeAll", "Clearing global pause, signalling all PAUSED uploads")
         isGlobalPaused.set(false)
+
+        // Signal all PAUSED uploads to resume
+        stateManager.activeUploads.value
+            .filter { it.value.state == UploadState.PAUSED }
+            .keys
+            .forEach { uploadId ->
+                scheduler.resume(uploadId) // sets RESUMING → browser POSTs
+            }
+
         updateQueueState { copy(isPaused = false) }
     }
 

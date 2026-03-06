@@ -19,24 +19,19 @@ import com.swaran.airbridge.core.network.upload.UploadScheduler
 import com.swaran.airbridge.core.service.doze.DozeModeMonitor
 import com.swaran.airbridge.core.service.mdns.AirBridgeMdnsService
 import com.swaran.airbridge.core.service.network.NetworkMonitor
-import com.swaran.airbridge.core.service.notification.UploadActionReceiver
 import com.swaran.airbridge.core.service.notification.UploadNotificationManager
 import com.swaran.airbridge.core.service.thermal.ThermalMonitor
-import com.swaran.airbridge.domain.model.UploadMetadata
 import com.swaran.airbridge.domain.model.UploadState
-import com.swaran.airbridge.domain.repository.UploadStatePersistence
 import com.swaran.airbridge.domain.usecase.UploadStateManager
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -77,8 +72,6 @@ class ForegroundServerService : Service() {
     lateinit var networkMonitor: NetworkMonitor
     @Inject
     lateinit var dozeModeMonitor: DozeModeMonitor
-    @Inject
-    lateinit var uploadStatePersistence: UploadStatePersistence
     @Inject
     lateinit var logger: AirLogger
     @Inject
@@ -139,55 +132,7 @@ class ForegroundServerService : Service() {
     private fun recoverInterruptedUploads() {
         serviceScope.launch {
             try {
-                // Load persisted uploads that can be recovered
-                val recoverableUploads = uploadStatePersistence.loadAll()
-                    .filter { it.canRecover() }
-                
-                if (recoverableUploads.isEmpty()) {
-                    logger.d(TAG, "log", "No uploads to recover")
-                    return@launch
-                }
-                
-                logger.i(TAG, "log", "Recovering ${recoverableUploads.size} interrupted uploads")
-                
-                recoverableUploads.forEach { persisted ->
-                    val uploadId = persisted.uploadId
-                    
-                    // Initialize upload in state manager
-                    val metadata = UploadMetadata(
-                        uploadId = uploadId,
-                        fileUri = persisted.fileUri,
-                        displayName = persisted.displayName,
-                        path = persisted.path,
-                        totalBytes = persisted.totalBytes
-                    )
-                    
-                    uploadStateManager.initialize(metadata)
-                    
-                    // Restore bytes received
-                    uploadStateManager.updateProgress(uploadId, persisted.bytesReceived)
-                    
-                    // Determine recovery state
-                    val recoveredState = persisted.recoveryState()
-                    
-                    uploadStateManager.transition(
-                        uploadId = uploadId,
-                        newState = recoveredState,
-                        errorMessage = if (recoveredState == UploadState.ERROR) {
-                            "Upload interrupted by app termination"
-                        } else null
-                    )
-                    
-                    logger.d(TAG, "log", "[$uploadId] Recovered to $recoveredState (${persisted.bytesReceived} bytes)")
-                }
-                
-                // Persist the recovery states
-                uploadStateManager.activeUploads.value.values
-                    .filter { !it.isTerminal }
-                    .forEach { status ->
-                        uploadStatePersistence.persist(status)
-                    }
-                    
+                uploadStateManager.recoverPersistedUploads()
             } catch (e: Exception) {
                 logger.e(TAG, "log", "Failed to recover interrupted uploads", e)
             }

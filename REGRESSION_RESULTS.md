@@ -142,7 +142,7 @@ All 26 use cases from the test plan have been verified and are now passing. The 
 **Code Path Verified**:
 1. ✅ Phone: `uploadQueueManager.resume(id)`
 2. ✅ Server: `UploadScheduler.resume()` → transition RESUMING
-3. ✅ Server: Sets 5-second deadline
+3. ✅ Server: Sets 30-second deadline
 4. ✅ Server: SSE event 'resuming'
 5. ✅ Browser: `sseConnection.onmessage` → sees 'resuming'
 6. ✅ Browser: `uploadQueue.resume()` → state 'queued'

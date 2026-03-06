@@ -91,6 +91,8 @@ Android Storage (SAF / MediaStore)
 * Progress tracking
 * Global pause flag
 * State transition validation
+* **State persistence to disk for crash recovery**
+* **Automatic recovery of interrupted uploads on app restart**
 
 #### StorageRepository
 
@@ -275,17 +277,25 @@ Resume latency target: < 300ms
 
 ### 7.3 Resume Deadline
 
-Server sets 5-second deadline when entering RESUMING state.
-
-If no browser POST arrives:
+Server sets 30-second deadline when entering RESUMING state.
 
 ```kotlin
-if (deadlineExpired && state == RESUMING) {
-    state = PAUSED
+resumeDeadlines[uploadId] = applicationScope.launch {
+    delay(RESUME_DEADLINE_MS)
+    if (stateManager.getStatus(uploadId)?.state == RESUMING) {
+        state = PAUSED  // Revert if browser never POSTed
+    }
 }
 ```
 
-This prevents stuck handshakes.
+**Deadline Cancellation:** When browser POST arrives, the deadline job is cancelled:
+
+```kotlin
+// In handleUpload() - browser POST received
+resumeDeadlines.remove(uploadId)?.cancel()  // Cancel pending deadline
+```
+
+This prevents stuck handshakes AND ensures deadline doesn't fire after successful resume.
 
 ---
 
@@ -452,6 +462,59 @@ Architecture supports extension without changing core upload engine.
 
 ---
 
+## 14. State Persistence Architecture
+
+### 14.1 Design Rationale
+
+Upload states must survive:
+
+* App termination (swipe away)
+* System-initiated process death
+* Phone reboot
+* Crash during upload
+
+### 14.2 Persistence Strategy
+
+**What is persisted:**
+
+* Upload metadata (id, filename, path, totalBytes)
+* Current state (UPLOADING, PAUSED, etc.)
+* Bytes received (disk offset)
+* Error messages
+
+**What is NOT persisted:**
+
+* In-memory progress (progress updates every 250ms)
+* Active job references (non-serializable)
+* Lock states (reconstructed on restart)
+
+### 14.3 Storage Implementation
+
+Uses atomic file writes (write to temp, then rename) for crash safety:
+
+```kotlin
+val tempFile = File(file.parent, "${file.name}.tmp")
+tempFile.writeText(json)
+tempFile.renameTo(file)  // Atomic
+```
+
+### 14.4 Recovery on App Restart
+
+When ForegroundServerService starts:
+
+1. Load all persisted uploads from disk
+2. Filter for recoverable states (UPLOADING, PAUSED)
+3. UPLOADING → PAUSED (coroutine died, can't recover)
+4. PAUSED → PAUSED (ready for resume)
+5. Initialize recovered uploads in UploadStateManager
+6. Browser can resume via normal POST flow
+
+### 14.5 Cleanup Policy
+
+Terminal states (COMPLETED, CANCELLED, ERROR) are removed from persistence after 24 hours to prevent accumulation.
+
+---
+
 ## 14. Production Guarantees
 
 The system guarantees:
@@ -463,6 +526,9 @@ The system guarantees:
 * **Instant pause** — 8KB buffer + ensureActive()
 * **Safe parallel uploads** — Semaphore limiting
 * **Crash-safe** — Disk size is source of truth
+* **State persistence** — Upload states survive app restart
+* **Network disconnect handling** — Auto-pause on connection loss
+* **Race-free queue processing** — Browser queue reentrancy guard
 
 ---
 

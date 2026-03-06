@@ -273,6 +273,7 @@
                 this.queue = [];
                 this.items = new Map();
                 this.globalPaused = false;
+                this.processing = false;  // Reentrancy guard
             }
 
             add(file, priority = 0) {
@@ -285,16 +286,22 @@
             }
 
             process() {
+                if (this.processing) return;  // Atomic guard - only one scheduler runs
                 if (this.globalPaused) {
                     debugLog('QUEUE', 'Global pause active, not processing');
                     return;
                 }
 
-                while (this.active < this.maxParallel && this.queue.length > 0) {
-                    const next = this.dequeue();
-                    if (next) {
-                        this.start(next);
+                this.processing = true;
+                try {
+                    while (this.active < this.maxParallel && this.queue.length > 0) {
+                        const next = this.dequeue();
+                        if (next) {
+                            this.start(next);
+                        }
                     }
+                } finally {
+                    this.processing = false;
                 }
                 
                 this.updateUI();
@@ -309,7 +316,7 @@
             }
 
             start(item) {
-                this.active++;
+                this.active++;  // Increment BEFORE starting (prevents race)
                 item.state = 'uploading';
                 item.isPaused = false;
                 debugLog('QUEUE', `Starting ${item.id}, active: ${this.active}/${this.maxParallel}`);
@@ -437,6 +444,7 @@
                 this.fileSize = file.size;
                 this.priority = priority;
                 this.offset = 0;
+                this.serverOffset = 0;  // Server-confirmed bytes (source of truth)
                 this.state = 'queued';
                 this.isPaused = false;
                 this.xhr = null;
@@ -447,7 +455,8 @@
             }
 
             updateProgress(bytesReceived) {
-                this.offset = bytesReceived;
+                this.serverOffset = bytesReceived;  // Server is source of truth
+                this.offset = Math.max(this.offset, bytesReceived);  // Never go backward
                 this.progress = this.fileSize > 0 ? (bytesReceived / this.fileSize) * 100 : 0;
                 
                 // Calculate speed
@@ -503,8 +512,15 @@
                     if (status.state && status.state !== item.state) {
                         debugLog('UPLOAD', `${item.id} - Syncing state from server: ${status.state}`);
                         
+                        // RESUMING from server - we should POST immediately to start uploading
+                        if (status.state === 'resuming') {
+                            debugLog('UPLOAD', `${item.id} - Server is resuming, proceeding to POST immediately`);
+                            item.state = 'resuming';
+                            item.isPaused = false;
+                            // Continue to POST below - don't return
+                        }
                         // PAUSED or INTERRUPTED from phone - abort XHR immediately, freeze progress
-                    if (status.state === 'paused' || status.state === 'pausing' || status.state === 'interrupted') {
+                        else if (status.state === 'paused' || status.state === 'pausing' || status.state === 'interrupted') {
                         // CRITICAL: Abort XHR immediately to stop progress
                         if (item.xhr) {
                             item.xhr.abort();
@@ -516,6 +532,7 @@
                         // Freeze progress at server-reported offset
                         const serverPercent = (status.bytesReceived / item.fileSize) * 100;
                         item.progress = Math.min(serverPercent, 99.9);
+                        item.serverOffset = status.bytesReceived || 0;
                         item.offset = status.bytesReceived || 0;
                         
                         uploadQueue.updateUI();
@@ -610,9 +627,11 @@
 
                 xhr.open('POST', `${serverUrl}/api/upload?token=${token}&filename=${encodeURIComponent(item.name)}&id=${item.id}`);
 
-                if (offset > 0) {
-                    xhr.setRequestHeader('Content-Range', `bytes ${offset}-${item.fileSize-1}/${item.fileSize}`);
-                }
+                // Always set Content-Range — not just when offset > 0
+                xhr.setRequestHeader(
+                    'Content-Range',
+                    `bytes ${offset}-${item.fileSize - 1}/${item.fileSize}`
+                );
 
                 const percentBase = (offset / item.fileSize) * 100;
 
@@ -623,8 +642,14 @@
                     if (e.lengthComputable) {
                         const chunkProgress = e.loaded / e.total;
                         const totalProgress = percentBase + (chunkProgress * (100 - percentBase));
-                        item.progress = Math.min(totalProgress, 99.9);
-                        item.offset = offset + e.loaded;
+                        
+                        // CAP progress by server-reported offset + small margin
+                        // Prevents TCP buffer drift - browser may have sent bytes server hasn't written yet
+                        const serverPercent = (item.serverOffset / item.fileSize) * 100;
+                        const cappedProgress = Math.min(totalProgress, serverPercent + 2);
+                        
+                        item.progress = Math.min(cappedProgress, 99.9);
+                        item.offset = offset + e.loaded;  // Optimistic client offset
                         uploadQueue.updateUI();
                     }
                 };
@@ -753,6 +778,8 @@
                             uploadQueue.updateUI();
                         } else if (data.state === 'completed') {
                             item.state = 'completed';
+                            item.serverOffset = item.fileSize;
+                            item.offset = item.fileSize;
                             item.progress = 100;
                             if (item.xhr) item.xhr.abort();
                             uploadQueue.updateUI();
@@ -760,8 +787,12 @@
                             loadFiles();
                         } else if (data.state === 'uploading') {
                             // Only update progress if we are actually uploading
-                            if (!item.isPaused && item.state === 'uploading' && data.bytesReceived > item.offset) {
-                                item.updateProgress(data.bytesReceived);
+                            if (!item.isPaused && item.state === 'uploading' && data.bytesReceived > item.serverOffset) {
+                                item.serverOffset = data.bytesReceived;
+                                // Only update visible progress if server has moved forward
+                                if (data.bytesReceived > item.offset) {
+                                    item.updateProgress(data.bytesReceived);
+                                }
                                 uploadQueue.updateUI();
                             }
                         }
@@ -934,7 +965,9 @@
                         <button onclick="cancelUpload('${upload.id}')" class="text-red-500 hover:text-red-600 text-sm">Cancel</button>`;
                     break;
                 case 'uploading':
-                    statusText = `Uploading ${formatSpeed(upload.speed)}`;
+                    // Only show speed if we have actual data flowing
+                    const speedText = upload.speed > 0 ? formatSpeed(upload.speed) : 'connecting...';
+                    statusText = `Uploading ${speedText}`;
                     actionButtons = `
                         <button onclick="pauseUpload('${upload.id}')" class="text-yellow-500 hover:text-yellow-600 text-sm mr-2">Pause</button>
                         <button onclick="cancelUpload('${upload.id}')" class="text-red-500 hover:text-red-600 text-sm">Cancel</button>

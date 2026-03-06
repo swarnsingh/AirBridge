@@ -168,7 +168,7 @@ File 3: UPLOADING ──► CANCELLED (file deleted)
    - Resume File 1 → Verify it catches up
 
 5. **Resume Deadline Test**
-   - Pause file → Resume → Wait 5 seconds without browser responding
+   - Pause file → Resume → Wait 30 seconds without browser responding
    - Verify server reverts to PAUSED automatically
 
 ---
@@ -208,8 +208,162 @@ adb logcat | grep -E "transition|Invalid"
 | SSE terminal states | UploadRoutes.kt | 123 | Removed isTerminal filter |
 | Exception handling | FileRepository.kt | 317-320 | Use 'is' checks |
 | ApplicationScope | DispatchersModule.kt | 44-50 | Added for deadline watchers |
+| Deadline cancellation | UploadScheduler.kt | 144, 367-375 | Store and cancel deadline jobs |
+| Progress capping | index.html | 432-442, 621-631 | serverOffset tracking |
+| Queue reentrancy | index.html | 269-301 | Atomic process() guard |
+| Network cleanup | UploadScheduler.kt | 251-260 | invokeOnCompletion handler |
+| UC-05 race guard | UploadScheduler.kt | 268-273 | Pre-streaming validation |
+| State persistence | UploadStateManager.kt | 42-159 | Integrated persistence layer |
 
-**All tests passing: 73 tests** ✅
+---
+
+## 6. RESUME DEADLINE JOB CANCELLATION ✅ FIXED
+
+### Root Cause
+The `resumeDeadlines` map existed but was never populated with the actual Job. When browser POSTed on time, the deadline coroutine would still fire after 5s, creating a race condition that reverted RESUMING → PAUSED even after successful resume.
+
+### Fix Applied (UploadScheduler.kt:144, 367-375, 172)
+```kotlin
+// Store Job in map (was storing unused Long)
+private val resumeDeadlines = ConcurrentHashMap<String, Job>()
+
+// Store deadline job when created
+resumeDeadlines[uploadId] = applicationScope.launch {
+    delay(RESUME_DEADLINE_MS)
+    // ... revert logic
+}
+
+// Cancel deadline when browser POSTs
+resumeDeadlines.remove(uploadId)?.cancel()
+```
+
+### Result
+Deadline properly cancels when browser uploads on time. No more race condition.
+
+---
+
+## 7. BROWSER PROGRESS CAPPING ✅ FIXED
+
+### Root Cause
+Browser showed inflated progress due to TCP buffering. `onprogress` fired for bytes in buffer, not bytes written to disk. On resume, progress would jump backward.
+
+### Fix Applied (index.html:432-442, 621-631)
+```javascript
+// Added serverOffset field to UploadItem (server-authoritative)
+this.serverOffset = 0;
+
+// Cap progress display at serverOffset + 2% margin
+const serverPercent = (item.serverOffset / item.fileSize) * 100;
+const cappedProgress = Math.min(optimisticProgress, serverPercent + 2);
+item.progress = Math.min(cappedProgress, 99.9);
+```
+
+### Result
+Progress bar never exceeds server-reported bytes. No backward jumps on resume.
+
+---
+
+## 8. QUEUE REENTRANCY GUARD ✅ FIXED
+
+### Root Cause
+`process()` in UploadQueueManager could be called concurrently by multiple events (upload complete, resume button, SSE update, retry). This caused exceeding `MAX_PARALLEL` limit.
+
+### Fix Applied (index.html:269-301)
+```javascript
+constructor(maxParallel = 3) {
+    // ...
+    this.processing = false;  // Reentrancy guard
+}
+
+process() {
+    if (this.processing) return;  // Only one scheduler runs
+    this.processing = true;
+    try {
+        while (this.active < this.maxParallel && this.queue.length > 0) {
+            // ... process queue
+        }
+    } finally {
+        this.processing = false;
+    }
+}
+```
+
+### Result
+Strict enforcement of MAX_PARALLEL even with rapid-fire events.
+
+---
+
+## 9. NETWORK DISCONNECT CLEANUP ✅ FIXED
+
+### Root Cause
+When browser disconnected (network drop, tab close), the server coroutine died but state remained UPLOADING. Status queries returned stale UPLOADING state.
+
+### Fix Applied (UploadScheduler.kt:251-260)
+```kotlin
+coroutineContext.job.invokeOnCompletion { cause ->
+    if (cause != null) {
+        val currentState = stateManager.getStatus(uploadId)?.state
+        if (currentState == UPLOADING || currentState == RESUMING) {
+            stateManager.transition(uploadId, PAUSED, "Connection lost")
+        }
+    }
+}
+```
+
+### Result
+Upload auto-pauses on unexpected disconnect. Clean state for recovery.
+
+---
+
+## 10. UC-05 RACE GUARD (PAUSE AFTER RESUME) ✅ FIXED
+
+### Root Cause
+Race window between state transition to UPLOADING and first chunk read. If pause arrived during this window, job cancel didn't propagate correctly.
+
+### Fix Applied (UploadScheduler.kt:268-273)
+```kotlin
+// After receiving stream, before processing
+val preStreamState = stateManager.getStatus(uploadId)?.state
+if (preStreamState != UPLOADING) {
+    stream.close()
+    return UploadResult.Busy(uploadId, retryAfterMs = 100)
+}
+```
+
+### Result
+Pre-streaming state validation catches pause-immediately-after-resume race.
+
+---
+
+## 11. STATE PERSISTENCE INTEGRATION ✅ FIXED
+
+### Root Cause
+UploadStateManager was in-memory only. All state lost on app kill. Uploads couldn't resume after app restart.
+
+### Fix Applied (UploadStateManager.kt, ForegroundServerService.kt)
+```kotlin
+// UploadStateManager now injects persistence
+class UploadStateManager @Inject constructor(
+    private val logger: AirLogger,
+    private val persistence: UploadStatePersistence
+)
+
+// Persist on state transitions
+persistenceScope.launch {
+    persistence.persist(updated)
+}
+
+// Recover on app startup
+suspend fun recoverPersistedUploads() {
+    val persisted = persistence.loadAll()
+    // Restore to state manager
+}
+```
+
+### Result
+Upload states survive app restart. Automatic recovery on service start.
+
+---
 
 ---
 

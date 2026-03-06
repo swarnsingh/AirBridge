@@ -22,7 +22,9 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.yield
+import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import javax.inject.Inject
@@ -497,28 +499,23 @@ class FileRepository @Inject constructor(
      * @param bufferSize Buffer size for each read/write (default 8KB for quick cancellation)
      * @param onProgress Called after each write with total bytes written
      */
-    private suspend fun InputStream.copyToCancellable(out: OutputStream, bufferSize: Int = 8*1024, onProgress: (Long) -> Unit) {
+    private suspend fun InputStream.copyToCancellable(
+        out: OutputStream,
+        bufferSize: Int = 8 * 1024,
+        onProgress: (Long) -> Unit
+    ) {
         val buffer = ByteArray(bufferSize)
-        var total: Long = 0
-        var bytesRead: Int
-
         while (true) {
-            // REQUIRED: Cooperative cancellation for instant pause under heavy I/O
             currentCoroutineContext().ensureActive()
-            yield()
-
-            bytesRead = read(buffer)
+            // 30s read timeout — connection stall detection
+            val bytesRead = withTimeoutOrNull(30_000) {
+                read(buffer)
+            } ?: throw IOException("Read timeout — connection stalled")
             if (bytesRead < 0) break
-
             out.write(buffer, 0, bytesRead)
-            total += bytesRead
-            onProgress(total)
-
-            // REQUIRED: Check cancellation after each write
+            onProgress(bytesRead.toLong())
             currentCoroutineContext().ensureActive()
-            yield()
         }
-
         out.flush()
     }
 

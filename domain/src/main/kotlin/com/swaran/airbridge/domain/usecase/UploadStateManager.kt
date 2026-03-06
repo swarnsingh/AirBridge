@@ -4,11 +4,15 @@ import com.swaran.airbridge.core.common.logging.AirLogger
 import com.swaran.airbridge.domain.model.UploadMetadata
 import com.swaran.airbridge.domain.model.UploadState
 import com.swaran.airbridge.domain.model.UploadStatus
+import com.swaran.airbridge.domain.repository.UploadStatePersistence
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -18,6 +22,7 @@ import javax.inject.Singleton
  *
  * Manages upload state transitions with atomic compare-and-set operations.
  * All transitions are validated against the UploadState.canTransitionTo() rules.
+ * Persists state to survive app restarts.
  *
  * ## Supported States
  *
@@ -35,19 +40,24 @@ import javax.inject.Singleton
  *
  * All operations use ConcurrentHashMap and AtomicReference for thread-safe
  * state updates without blocking. StateFlow is throttled to prevent
- * excessive UI updates.
+ * excessive UI updates. State persistence is async and non-blocking.
  *
  * @see UploadState For state machine transition rules
  */
 @Singleton
 class UploadStateManager @Inject constructor(
-    private val logger: AirLogger
+    private val logger: AirLogger,
+    private val persistence: UploadStatePersistence
 ) {
     private val states = ConcurrentHashMap<String, AtomicReference<UploadStatus>>()
     private val _activeUploads = MutableStateFlow<Map<String, UploadStatus>>(emptyMap())
     val activeUploads: StateFlow<Map<String, UploadStatus>> = _activeUploads.asStateFlow()
 
-    private val lastFlowUpdateMs = AtomicLong(0L)
+    // Per-upload flow update throttling - prevents shared bottleneck
+    private val lastFlowUpdateMs = ConcurrentHashMap<String, Long>()
+    
+    // Coroutine scope for persistence operations
+    private val persistenceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     companion object {
         private const val TAG = "UploadStateManager"
@@ -55,6 +65,44 @@ class UploadStateManager @Inject constructor(
     }
 
     private fun monotonicTimeMs(): Long = System.nanoTime() / 1_000_000L
+    
+    /**
+     * Recover uploads from persistence on app startup.
+     * Should be called once during initialization.
+     */
+    suspend fun recoverPersistedUploads() {
+        val persisted = persistence.loadAll()
+        logger.d(TAG, "recover", "Recovering ${persisted.size} persisted uploads")
+        
+        persisted.forEach { p ->
+            if (p.canRecover()) {
+                val recoveryState = p.recoveryState()
+                val metadata = UploadMetadata(
+                    uploadId = p.uploadId,
+                    fileUri = p.fileUri,
+                    displayName = p.displayName,
+                    path = p.path,
+                    totalBytes = p.totalBytes
+                )
+                
+                val ref = AtomicReference(
+                    UploadStatus(
+                        metadata = metadata,
+                        state = recoveryState,
+                        bytesReceived = p.bytesReceived,
+                        startedAt = p.startedAtNanos,
+                        updatedAt = monotonicTimeMs()
+                    )
+                )
+                states[p.uploadId] = ref
+                logger.d(TAG, "recover", "[${p.uploadId}] Recovered to state: $recoveryState")
+            } else {
+                // Clean up terminal states
+                persistence.remove(p.uploadId)
+            }
+        }
+        updateFlow()
+    }
 
     /**
      * Initialize upload. Idempotent - no-op if exists.
@@ -70,6 +118,10 @@ class UploadStateManager @Inject constructor(
         val existing = states.putIfAbsent(metadata.uploadId, ref)
         if (existing == null) {
             updateFlow()
+            // Persist initial state
+            persistenceScope.launch {
+                persistence.persist(ref.get())
+            }
             return true
         }
         return false
@@ -77,6 +129,7 @@ class UploadStateManager @Inject constructor(
 
     /**
      * State transition. Validated against state machine rules.
+     * Resets startedAt when transitioning to UPLOADING to fix speed calculation on resume.
      */
     fun transition(uploadId: String, newState: UploadState, errorMessage: String? = null): Boolean {
         val ref = states[uploadId] ?: return false
@@ -88,15 +141,25 @@ class UploadStateManager @Inject constructor(
                 return false
             }
 
+            val now = monotonicTimeMs()
             val updated = current.copy(
                 state = newState,
-                updatedAt = monotonicTimeMs(),
+                updatedAt = now,
+                startedAt = if (newState == UploadState.UPLOADING) now else current.startedAt,
                 errorMessage = errorMessage
             )
 
             if (ref.compareAndSet(current, updated)) {
                 logger.d(TAG, "transition", "[$uploadId] ${current.state} -> $newState")
                 updateFlow()
+                // Persist state change asynchronously
+                persistenceScope.launch {
+                    persistence.persist(updated)
+                    // Clean up terminal states from persistence
+                    if (newState in setOf(UploadState.COMPLETED, UploadState.CANCELLED, UploadState.ERROR)) {
+                        persistence.remove(uploadId)
+                    }
+                }
                 return true
             }
         }
@@ -104,6 +167,8 @@ class UploadStateManager @Inject constructor(
 
     /**
      * Update progress. Only allowed during UPLOADING.
+     * Uses per-upload throttling to prevent shared bottleneck.
+     * Progress updates are NOT persisted (only state transitions).
      */
     fun updateProgress(uploadId: String, bytesReceived: Long): Boolean {
         val ref = states[uploadId] ?: return false
@@ -123,10 +188,11 @@ class UploadStateManager @Inject constructor(
             )
 
             if (ref.compareAndSet(current, updated)) {
-                // Throttle flow updates
-                val last = lastFlowUpdateMs.get()
+                // Per-upload throttling - prevents shared bottleneck across files
+                val last = lastFlowUpdateMs[uploadId] ?: 0L
                 val shouldEmit = (now - last > FLOW_THROTTLE_MS) || bytesReceived >= current.metadata.totalBytes
-                if (shouldEmit && lastFlowUpdateMs.compareAndSet(last, now)) {
+                if (shouldEmit) {
+                    lastFlowUpdateMs[uploadId] = now
                     updateFlow()
                 }
                 return true
@@ -138,7 +204,11 @@ class UploadStateManager @Inject constructor(
 
     fun remove(uploadId: String) {
         states.remove(uploadId)
+        lastFlowUpdateMs.remove(uploadId)
         updateFlow()
+        persistenceScope.launch {
+            persistence.remove(uploadId)
+        }
     }
 
     private fun updateFlow() {
@@ -147,6 +217,10 @@ class UploadStateManager @Inject constructor(
 
     fun clear() {
         states.clear()
+        lastFlowUpdateMs.clear()
         updateFlow()
+        persistenceScope.launch {
+            persistence.clear()
+        }
     }
 }

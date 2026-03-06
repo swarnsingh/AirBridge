@@ -87,7 +87,7 @@ Phone UI          Server              Browser
    │ resumeUpload() │                   │
    │───────────────►│                   │
    │                │ state=RESUMING    │
-   │                │ (5s deadline)     │
+   │                │ (30s deadline)     │
    │                │                   │
    │                │◄──────────────────│ POST /upload
    │                │   Content-Range:  │   bytes offset-end/total
@@ -388,7 +388,7 @@ Logs to console:
 |-----------|-----------|
 | No duplicate bytes | Strict offset validation |
 | No concurrent writes | File-level mutex |
-| Deterministic resume | POST-driven protocol with 5s deadline |
+| Deterministic resume | POST-driven protocol with 30s deadline |
 | No deadlocks | Fail-fast locking, browser retry |
 | Instant pause | 8KB buffer + ensureActive() checks |
 | Safe parallel uploads | Semaphore limiting + per-file locking |

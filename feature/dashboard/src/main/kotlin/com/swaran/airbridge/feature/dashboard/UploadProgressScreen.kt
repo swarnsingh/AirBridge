@@ -193,7 +193,11 @@ private fun TransferActionButtons(
     onResume: () -> Unit,
     onCancel: () -> Unit
 ) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.End,
+                    modifier = Modifier.widthIn(min = 80.dp)
+                ) {
         when (status) {
             TransferStatus.UPLOADING, TransferStatus.RESUMING -> {
                 FilledTonalIconButton(
