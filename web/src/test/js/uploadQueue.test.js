@@ -366,3 +366,71 @@ describe('resume button error handling', () => {
     expect(toasts[0].message).toMatch(/cannot resume/i);
   });
 });
+
+
+describe('resumeAll respects max parallel scheduling', () => {
+  class SimQueue {
+    constructor(maxParallel = 3) {
+      this.maxParallel = maxParallel;
+      this.active = 0;
+      this.queue = [];
+      this.items = new Map();
+      this.started = [];
+      this.globalPaused = true;
+      this.processing = false;
+    }
+
+    add(item) {
+      this.items.set(item.id, item);
+    }
+
+    resume(id) {
+      const item = this.items.get(id);
+      if (!item) return false;
+      if (item.state === 'completed' || item.state === 'cancelled') return false;
+      if (item.state === 'uploading') return false;
+      item.state = 'queued';
+      if (!this.queue.find(i => i.id === id)) this.queue.push(item);
+      return true;
+    }
+
+    process() {
+      if (this.processing) return;
+      this.processing = true;
+      try {
+        while (this.active < this.maxParallel && this.queue.length > 0) {
+          const item = this.queue.shift();
+          this.active++;
+          item.state = 'uploading';
+          this.started.push(item.id);
+        }
+      } finally {
+        this.processing = false;
+      }
+    }
+
+    resumeAll() {
+      this.globalPaused = false;
+      this.items.forEach(item => {
+        if (item.state === 'paused' || item.state === 'pausing') {
+          this.resume(item.id);
+        }
+      });
+      this.process();
+    }
+  }
+
+  test('resumeAll starts at most maxParallel uploads immediately', () => {
+    const queue = new SimQueue(3);
+
+    for (let i = 1; i <= 6; i++) {
+      queue.add({ id: `u-${i}`, state: 'paused' });
+    }
+
+    queue.resumeAll();
+
+    expect(queue.started.length).toBe(3);
+    expect(queue.active).toBe(3);
+    expect(queue.queue.length).toBe(3);
+  });
+});

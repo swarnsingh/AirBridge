@@ -345,6 +345,7 @@ Content-Length: {chunkSize}
 1. Clear global queue pause flag
 2. Transition paused uploads to `RESUMING`
 3. Browser receives SSE and resumes with POST from disk offsets
+4. Effective upload concurrency remains bounded by server admission control and browser `MAX_PARALLEL_UPLOADS`
 
 **Response (200 OK):**
 ```json
