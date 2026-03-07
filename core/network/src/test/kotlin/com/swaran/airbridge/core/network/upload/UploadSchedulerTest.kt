@@ -7,23 +7,37 @@ import com.swaran.airbridge.domain.model.UploadMetadata
 import com.swaran.airbridge.domain.model.UploadState
 import com.swaran.airbridge.domain.repository.StorageRepository
 import com.swaran.airbridge.domain.usecase.UploadStateManager
+import com.swaran.airbridge.domain.repository.UploadStatePersistence
+import com.swaran.airbridge.domain.repository.PersistedUpload
+import com.swaran.airbridge.domain.model.UploadStatus
 import org.junit.Before
 import org.junit.Test
 import org.junit.Assert.*
 import java.io.InputStream
+import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emptyFlow
 
 /**
- * Unit tests for UploadScheduler (basic state transitions only)
+ * Unit tests for UploadScheduler
  */
 class UploadSchedulerTest {
 
     private lateinit var scheduler: UploadScheduler
     private lateinit var stateManager: UploadStateManager
     private lateinit var storageRepository: StorageRepository
+    private val testScope = TestScope()
 
     @Before
     fun setup() {
-        stateManager = UploadStateManager(TestLogger())
+        val persistence = object : UploadStatePersistence {
+            override suspend fun persist(status: UploadStatus) {}
+            override suspend fun loadAll(): List<PersistedUpload> = emptyList()
+            override suspend fun remove(uploadId: String) {}
+            override suspend fun clear() {}
+            override val persistedStates: Flow<Map<String, PersistedUpload>> = emptyFlow()
+        }
+        stateManager = UploadStateManager(TestLogger(), persistence)
         
         // Minimal mock storage repository
         storageRepository = object : StorageRepository {
@@ -49,7 +63,7 @@ class UploadSchedulerTest {
             storageRepository = storageRepository,
             stateManager = stateManager,
             logger = TestLogger(),
-            applicationScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob())
+            applicationScope = testScope
         )
     }
 
@@ -60,7 +74,7 @@ class UploadSchedulerTest {
         stateManager.initialize(metadata)
         stateManager.transition(uploadId, UploadState.UPLOADING)
 
-        scheduler.pause(uploadId)
+        scheduler.pauseUpload(uploadId)
 
         val status = stateManager.getStatus(uploadId)
         assertEquals(UploadState.PAUSING, status?.state)
@@ -75,58 +89,48 @@ class UploadSchedulerTest {
         stateManager.transition(uploadId, UploadState.PAUSING)
         stateManager.transition(uploadId, UploadState.PAUSED)
 
-        scheduler.resume(uploadId)
+        val accepted = scheduler.resume(uploadId)
 
+        assertTrue("Resume should be accepted", accepted)
         val status = stateManager.getStatus(uploadId)
         assertEquals(UploadState.RESUMING, status?.state)
     }
 
 
     @Test
-    fun `resume returns false when not paused`() {
-        val uploadId = "resume-reject-test"
+    fun `resume returns true if already resuming or uploading`() {
+        val uploadId = "resume-idempotent-test"
         val metadata = createMetadata(uploadId)
         stateManager.initialize(metadata)
-        stateManager.transition(uploadId, UploadState.UPLOADING)
-
-        val accepted = scheduler.resume(uploadId)
-
-        assertFalse(accepted)
-        assertEquals(UploadState.UPLOADING, stateManager.getStatus(uploadId)?.state)
-    }
-
-    @Test
-    fun `resume accepts once then rejects duplicate while resuming`() {
-        val uploadId = "resume-duplicate-test"
-        val metadata = createMetadata(uploadId)
-        stateManager.initialize(metadata)
+        
+        // Already resuming
         stateManager.transition(uploadId, UploadState.UPLOADING)
         stateManager.transition(uploadId, UploadState.PAUSING)
         stateManager.transition(uploadId, UploadState.PAUSED)
-
-        val first = scheduler.resume(uploadId)
-        val second = scheduler.resume(uploadId)
-
-        assertTrue(first)
-        assertFalse(second)
-        assertEquals(UploadState.RESUMING, stateManager.getStatus(uploadId)?.state)
+        scheduler.resume(uploadId)
+        assertTrue("Should return true if already RESUMING", scheduler.resume(uploadId))
+        
+        // Already uploading
+        stateManager.transition(uploadId, UploadState.UPLOADING)
+        assertTrue("Should return true if already UPLOADING", scheduler.resume(uploadId))
     }
 
-
     @Test
-    fun `pause should work while resuming`() {
+    fun `pause should set PAUSED directly if state is RESUMING`() {
         val uploadId = "pause-resuming-test"
         val metadata = createMetadata(uploadId)
         stateManager.initialize(metadata)
         stateManager.transition(uploadId, UploadState.UPLOADING)
         stateManager.transition(uploadId, UploadState.PAUSING)
         stateManager.transition(uploadId, UploadState.PAUSED)
-        assertTrue(scheduler.resume(uploadId))
+        scheduler.resume(uploadId)
+        assertEquals(UploadState.RESUMING, stateManager.getStatus(uploadId)?.state)
 
-        scheduler.pause(uploadId)
+        scheduler.pauseUpload(uploadId)
 
+        // RESUMING -> PAUSED (via pauseUpload which prevents PAUSING dead-end)
         val status = stateManager.getStatus(uploadId)
-        assertEquals(UploadState.PAUSING, status?.state)
+        assertEquals(UploadState.PAUSED, status?.state)
     }
 
     @Test

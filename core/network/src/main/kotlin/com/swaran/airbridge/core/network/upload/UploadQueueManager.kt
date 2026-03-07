@@ -36,37 +36,6 @@ import javax.inject.Singleton
  *
  * 3. **Layer Separation**: QueueManager handles HTTP-level orchestration, UploadScheduler handles
  *    file-level locking and state transitions, StorageRepository handles raw I/O.
- *
- * ## Concurrency Model
- *
- * ```
- * Browser POST → QueueManager.enqueue()
- *                      │
- *                      ▼
- *              tryAcquire semaphore slot
- *                      │
- *          ┌───────────┴───────────┐
- *          ▼                       ▼
- *     Success (slot            Fail (at capacity)
- *     available)                    │
- *          │                       ▼
- *          ▼              return UploadResult.Busy
- *   scheduler.handleUpload()        │
- *          │              Browser retries with
- *          ▼              exponential backoff
- *   perform upload
- * ```
- *
- * ## Queue State Broadcasting
- *
- * Queue state is exposed via [queueState] StateFlow for SSE broadcasting to browsers.
- * This provides real-time visibility into:
- * - Active upload count
- * - Paused uploads
- * - Global pause status
- *
- * @see UploadScheduler For file-level locking and state machine
- * @see UploadStateManager For deterministic state transitions
  */
 @Singleton
 class UploadQueueManager @Inject constructor(
@@ -76,9 +45,6 @@ class UploadQueueManager @Inject constructor(
 ) {
     companion object {
         private const val TAG = "UploadQueueManager"
-
-        /** Maximum concurrent uploads. Server returns Busy if exceeded. */
-        private const val DEFAULT_MAX_PARALLEL = 3
     }
 
     /** Track active upload jobs for pause/cancel operations */
@@ -93,24 +59,6 @@ class UploadQueueManager @Inject constructor(
 
     /**
      * Enqueue and execute an upload request.
-     *
-     * This is the main entry point from [UploadRoutes] when browser POSTs an upload.
-     *
-     * ## Fail-Fast Behavior
-     *
-     * If server is at concurrency capacity or globally paused, returns [UploadResult.Busy]
-     * immediately. Browser must retry with exponential backoff.
-     *
-     * ## Protocol Flow
-     *
-     * 1. Check global pause state
-     * 2. Delegate to [UploadScheduler.handleUpload] for file locking
-     * 3. Stream data via [receiveStream]
-     * 4. Return result based on final state
-     *
-     * @param request Upload metadata (id, filename, offset, etc.)
-     * @param receiveStream Suspended lambda providing the HTTP input stream
-     * @return UploadResult indicating success, pause, busy, or error
      */
     suspend fun enqueue(
         request: UploadRequest,
@@ -118,35 +66,20 @@ class UploadQueueManager @Inject constructor(
     ): UploadResult {
         logger.d(TAG, "enqueue", "[${request.uploadId}] Enqueuing ${request.fileName} (offset=${request.offset})")
 
-        // Check global pause - return busy if paused
         if (isGlobalPaused.get()) {
             logger.d(TAG, "enqueue", "[${request.uploadId}] Global pause active, returning Busy")
             return UploadResult.Busy(request.uploadId, retryAfterMs = 500)
         }
 
-        // Track active count for queue state
         updateQueueState()
-
-        // Start upload immediately - UploadScheduler handles fail-fast locking
         return startUpload(request, receiveStream)
     }
 
-    /**
-     * Start upload execution.
-     *
-     * Delegates to [UploadScheduler] which handles:
-     * - File-level mutex tryLock()
-     * - Semaphore tryAcquire()
-     * - Offset validation
-     * - State transitions
-     * - Cooperative cancellation
-     */
     private suspend fun startUpload(
         request: UploadRequest,
         receiveStream: suspend () -> java.io.InputStream
     ): UploadResult {
         val uploadId = request.uploadId
-        // Track the calling coroutine's job, not a wrapper
         coroutineContext[Job]?.let { activeJobs[uploadId] = it }
         updateQueueState()
 
@@ -160,35 +93,16 @@ class UploadQueueManager @Inject constructor(
 
     /**
      * Pause a specific upload.
-     *
-     * Sets state to PAUSING (transitional) via scheduler, which then cancels the job.
-     * The upload loop catches [CancellationException] and transitions to PAUSED.
-     *
-     * ## Protocol
-     *
-     * Phone UI → POST /api/upload/pause → Server sets PAUSING → job.cancel() →
-     * Server sets PAUSED → SSE event → Browser aborts XHR
      */
-    fun pause(uploadId: String) {
+    fun pause(uploadId: String): Boolean {
         logger.d(TAG, "pause", "[$uploadId] Requested")
-        // Signal through scheduler to ensure proper state machine transitions
-        scheduler.pause(uploadId)
+        val success = scheduler.pauseUpload(uploadId)
         activeJobs[uploadId]?.cancel()
+        return success
     }
 
     /**
      * Resume a specific upload.
-     *
-     * In the deterministic protocol, resume is **browser-driven**. This method
-     * transitions state to RESUMING, which signals to the browser that it should
-     * immediately POST to resume.
-     *
-     * ## Protocol
-     *
-     * Phone UI → POST /api/upload/resume → Server sets RESUMING → SSE event →
-     * Browser POSTs immediately → Server validates → State → UPLOADING
-     *
-     * @see UploadScheduler.resume for deadline handling
      */
     fun resume(uploadId: String): Boolean {
         logger.d(TAG, "resume", "[$uploadId] Resume requested")
@@ -201,60 +115,43 @@ class UploadQueueManager @Inject constructor(
 
     /**
      * Pause all active uploads.
-     *
-     * Sets global pause flag and cancels all active jobs via scheduler.
-     * New uploads will return [UploadResult.Busy] until [resumeAll] is called.
      */
     fun pauseAll() {
         logger.i(TAG, "pauseAll", "Pausing all uploads")
         isGlobalPaused.set(true)
 
         activeJobs.forEach { (uploadId, job) ->
-            scheduler.pause(uploadId)
+            scheduler.pauseUpload(uploadId)
             job.cancel()
         }
 
-        updateQueueState { copy(isPaused = true) }
-    }
-
-    /**
-     * Resume all uploads.
-     *
-     * Clears global pause flag and signals all PAUSED uploads to resume.
-     */
-    fun resumeAll() {
-        logger.i(TAG, "resumeAll", "Clearing global pause, signalling all PAUSED uploads")
-        isGlobalPaused.set(false)
-
-        // Signal all PAUSED uploads to resume
-        stateManager.activeUploads.value
-            .filter { it.value.state == UploadState.PAUSED }
-            .keys
-            .forEach { uploadId ->
-                scheduler.resume(uploadId) // sets RESUMING → browser POSTs
-            }
-
-        updateQueueState { copy(isPaused = false) }
-    }
-
-    /**
-     * Cancel a specific upload.
-     *
-     * Cancels the job and deletes partial file via [UploadScheduler.cancel].
-     */
-    suspend fun cancel(uploadId: String, request: UploadRequest) {
-        logger.d(TAG, "cancel", "[$uploadId] Cancelling")
-
-        activeJobs[uploadId]?.cancel()
-        activeJobs.remove(uploadId)
-
-        scheduler.cancel(uploadId, request)
         updateQueueState()
     }
 
     /**
-     * Get current queue statistics for metrics endpoint.
+     * Resume all uploads.
+     * 
+     * UC-07: Fix deadline expiration by NOT marking all as RESUMING immediately.
+     * We just clear global pause; the browser will iterate and POST each item,
+     * which handles state transition safely without mass-triggering 30s deadlines.
      */
+    fun resumeAll() {
+        logger.i(TAG, "resumeAll", "Clearing global pause")
+        isGlobalPaused.set(false)
+        updateQueueState()
+    }
+
+    /**
+     * Cancel a specific upload.
+     */
+    suspend fun cancel(uploadId: String, request: UploadRequest) {
+        logger.d(TAG, "cancel", "[$uploadId] Cancelling")
+        activeJobs[uploadId]?.cancel()
+        activeJobs.remove(uploadId)
+        scheduler.cancel(uploadId, request)
+        updateQueueState()
+    }
+
     fun getStats(): QueueStats {
         val all = stateManager.activeUploads.value
         return QueueStats(
@@ -267,7 +164,7 @@ class UploadQueueManager @Inject constructor(
         )
     }
 
-    private fun updateQueueState(transform: QueueState.() -> QueueState = { this }) {
+    private fun updateQueueState() {
         val stats = getStats()
         _queueState.update {
             QueueState(
@@ -279,14 +176,6 @@ class UploadQueueManager @Inject constructor(
         }
     }
 
-    /**
-     * Queue state for SSE broadcasting to browsers.
-     *
-     * @property isPaused Global pause state - new uploads rejected when true
-     * @property activeCount Currently uploading files
-     * @property queuedCount Files waiting for browser POST
-     * @property pausedCount Files in PAUSED or RESUMING state
-     */
     data class QueueState(
         val isPaused: Boolean = false,
         val activeCount: Int = 0,
@@ -294,9 +183,6 @@ class UploadQueueManager @Inject constructor(
         val pausedCount: Int = 0
     )
 
-    /**
-     * Queue statistics for metrics endpoint.
-     */
     data class QueueStats(
         val total: Int,
         val active: Int,

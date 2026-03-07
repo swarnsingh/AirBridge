@@ -1,5 +1,7 @@
 package com.swaran.airbridge.domain.model
 
+import kotlinx.serialization.Serializable
+
 /**
  * Upload state machine states - deterministic protocol v2.1 (fail-fast).
  *
@@ -23,7 +25,7 @@ enum class UploadState(val value: String) {
         return when (this) {
             NONE -> target in setOf(QUEUED, UPLOADING, CANCELLED)
             QUEUED -> target in setOf(RESUMING, UPLOADING, CANCELLED)
-            RESUMING -> target in setOf(UPLOADING, PAUSING, PAUSED, CANCELLED)
+            RESUMING -> target in setOf(UPLOADING, PAUSED, CANCELLED) // Avoid unrecoverable PAUSING dead-end
             UPLOADING -> target in setOf(PAUSING, PAUSED, COMPLETED, CANCELLED, ERROR)
             PAUSING -> target in setOf(PAUSED, CANCELLED, ERROR)
             PAUSED -> target in setOf(RESUMING, CANCELLED, UPLOADING) // UPLOADING for late POST resume
@@ -38,6 +40,7 @@ enum class UploadState(val value: String) {
 /**
  * Immutable upload metadata.
  */
+@Serializable
 data class UploadMetadata(
     val uploadId: String,
     val fileUri: String,

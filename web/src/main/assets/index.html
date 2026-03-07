@@ -859,9 +859,10 @@
                         } else if (data.state === 'resuming') {
                             // Server is ready for resume - browser should POST
                             debugLog('SSE', `${data.uploadId} - Server resuming, triggering resume`);
+
+                            // BUG FIX order: Call resume() first, then update item state
                             const resumed = uploadQueue.resume(data.uploadId);
                             if (resumed) {
-                                // start() may have already switched state to 'uploading' synchronously
                                 if (item.state !== 'uploading') {
                                     item.state = 'resuming';
                                 }
@@ -1004,11 +1005,11 @@
 
                 if (response.ok && data.success) {
                     // Optimistically show resuming, scheduler still starts via queue resume.
+                    // BUG FIX order: Call resume() first, then update state
                     const resumed = uploadQueue.resume(id);
                     if (resumed) {
                         const item = uploadQueue.items.get(id);
                         if (item) {
-                            // Do not overwrite active upload state if queue started immediately.
                             if (item.state !== 'uploading') {
                                 item.state = 'resuming';
                             }

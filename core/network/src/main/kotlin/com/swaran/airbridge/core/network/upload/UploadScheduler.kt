@@ -19,7 +19,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicReference
@@ -92,11 +91,11 @@ private data class UploadSession(
  *
  * ## Deterministic Resume Protocol
  *
- * 1. Phone calls [resume] → state = RESUMING + 5s deadline
+ * 1. Phone calls [resume] → state = RESUMING + 30s deadline
  * 2. SSE notifies browser
  * 3. Browser **immediately** POSTs to resume
  * 4. [handleUpload] validates offset and starts upload
- * 5. If no POST within 5s → revert to PAUSED
+ * 5. If no POST within 30s → revert to PAUSED
  *
  * **Critical**: Server never blocks waiting for browser. Browser never waits for server state.
  *
@@ -106,21 +105,6 @@ private data class UploadSession(
  * - Current state can transition to target state
  * - No illegal transitions (e.g., COMPLETED → UPLOADING)
  * - Thread-safe atomic updates
- *
- * ## Usage
- *
- * ```kotlin
- * // From HTTP route (suspended context)
- * val result = scheduler.handleUpload(request) { call.receiveStream() }
- *
- * when (result) {
- *     is UploadResult.Success -> // Upload complete
- *     is UploadResult.Busy -> // Return 409, browser will retry
- *     is UploadResult.Paused -> // User paused mid-upload
- *     is UploadResult.Failure.OffsetMismatch -> // Browser sent wrong offset
- *     // ...
- * }
- * ```
  *
  * @see UploadQueueManager HTTP layer orchestration
  * @see UploadStateManager Deterministic state machine
@@ -136,7 +120,7 @@ class UploadScheduler @Inject constructor(
     companion object {
         private const val TAG = "UploadScheduler"
         private const val MAX_CONCURRENT_UPLOADS = 3
-        private const val RESUME_DEADLINE_MS = 30000L  // 30s window for browser POST (was 5s)
+        private const val RESUME_DEADLINE_MS = 30000L  // 30s window for browser POST
     }
 
     private val sessions = ConcurrentHashMap<String, UploadSession>()
@@ -243,8 +227,12 @@ class UploadScheduler @Inject constructor(
         // 3️⃣ Transition to UPLOADING
         val allowed = stateManager.transition(uploadId, UploadState.UPLOADING)
         if (!allowed) {
-            logger.w(TAG, "performUpload", "[$uploadId] State transition rejected")
-            return UploadResult.Busy(uploadId, retryAfterMs = 100)
+            // Fix: If already UPLOADING (e.g. from parallel POST), don't return Busy if we already hold the lock
+            val currentState = stateManager.getStatus(uploadId)?.state
+            if (currentState != UploadState.UPLOADING) {
+                logger.w(TAG, "performUpload", "[$uploadId] State transition rejected (current=$currentState)")
+                return UploadResult.Busy(uploadId, retryAfterMs = 100)
+            }
         }
 
         logger.d(TAG, "performUpload", "[$uploadId] Starting upload from diskSize=$diskSize")
@@ -269,6 +257,10 @@ class UploadScheduler @Inject constructor(
             if (preStreamState != UploadState.UPLOADING) {
                 logger.w(TAG, "performUpload", "[$uploadId] State changed to $preStreamState before streaming, aborting")
                 stream.close()
+                // If it's already PAUSED, return Paused result instead of Busy
+                if (preStreamState == UploadState.PAUSED) {
+                    return UploadResult.Paused(uploadId, bytesReceived)
+                }
                 return UploadResult.Busy(uploadId, retryAfterMs = 100)
             }
             
@@ -358,9 +350,21 @@ class UploadScheduler @Inject constructor(
         // Cancel pending resume deadline immediately (if any) to avoid stale timer flips.
         resumeDeadlines.remove(uploadId)?.cancel()
 
+        // UC-06: Fix unrecoverable RESUMING -> PAUSING transition
+        // If state is RESUMING, transition directly to PAUSED to avoid PAUSING dead-end
+        val currentStatus = stateManager.getStatus(uploadId)
+        if (currentStatus?.state == UploadState.RESUMING) {
+             logger.d(TAG, "pauseUpload", "[$uploadId] RESUMING -> PAUSED (direct)")
+             return stateManager.transition(uploadId, UploadState.PAUSED)
+        }
+
         // Always transition state first - session may not exist if upload hasn't started
         val transitioned = stateManager.transition(uploadId, UploadState.PAUSING)
-        if (!transitioned) return false
+        if (!transitioned) {
+             val current = stateManager.getStatus(uploadId)?.state
+             if (current == UploadState.PAUSED || current == UploadState.PAUSING) return true
+             return false
+        }
 
         // Cancel/clear job if session exists
         sessions[uploadId]?.let { session ->
@@ -386,7 +390,10 @@ class UploadScheduler @Inject constructor(
         // Atomic transition check+set avoids TOCTOU between read and transition
         val transitioned = stateManager.transition(uploadId, UploadState.RESUMING)
         if (!transitioned) {
-            logger.w(TAG, "resume", "[$uploadId] Cannot resume from state ${stateManager.getStatus(uploadId)?.state}")
+            val status = stateManager.getStatus(uploadId)
+            // If already resuming or uploading, consider it "accepted"
+            if (status?.state == UploadState.RESUMING || status?.state == UploadState.UPLOADING) return true
+            logger.w(TAG, "resume", "[$uploadId] Cannot resume from state ${status?.state}")
             return false
         }
 
@@ -454,9 +461,13 @@ class UploadScheduler @Inject constructor(
      * Query status. Disk size is source of truth.
      */
     suspend fun queryStatus(path: String, fileName: String, uploadId: String?): UploadQueryResult {
-        val diskFile = storageRepository.findFileByName(path, fileName).getOrNull()
-        val diskSize = diskFile?.size ?: 0L
+        // Source of truth for path/filename should be the memState if available
         val memState = uploadId?.let { stateManager.getStatus(it) }
+        val effectivePath = memState?.metadata?.path ?: path
+        val effectiveFileName = memState?.metadata?.displayName ?: fileName
+
+        val diskFile = storageRepository.findFileByName(effectivePath, effectiveFileName).getOrNull()
+        val diskSize = diskFile?.size ?: 0L
 
         val state = when (memState?.state) {
             UploadState.COMPLETED -> UploadState.COMPLETED.value
